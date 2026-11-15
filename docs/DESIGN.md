@@ -1232,3 +1232,42 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
   或按 §32 路径引入 PG 做共享元数据。
 - **DB 上 GB / 备份窗口有感**：VACUUM INTO 挪到子进程或低峰。
 - **内存水位告警**：调低 `GATEWAY_SESSION_IDLE_TTL_MS` 或收紧每用户 `maxSessions`（环境变量，无需改码）。
+
+## 34. 契约与文档体系（M22）——OpenAPI 全量操作级描述 + 派生索引
+
+### 34.1 OpenAPI 从骨架到可消费契约
+
+原 `/openapi.json` 只内省出 path+method（无摘要、无参数、无响应模型），集成端无法据此写客户端。
+本轮把契约升级为**可直接生成客户端**的形态：
+
+| 维度 | 之前 | 现在 |
+|---|---|---|
+| 摘要 | 5 档族级兜底（55 个操作是"会话能力面"这类泛化描述） | **193/193 操作级摘要**（覆盖率 100%） |
+| 查询参数 | 仅路径参数 | 28 组端点声明查询参数（status/page/types/since/limit/format/refresh/confirm…） |
+| 请求体 | 无 | 16 个端点带 JSON Schema（prompt/inject/businessEvent/approvalDecision/createSession/webhookRegister/hookRegister/httpToolRegister/modelsConfigJson/agentDefinition/modelRef/migrationImport 等） |
+| 响应 | 统一 `type: object` | **43 个响应模型**（Session/SessionList/SessionState/Bootstrap/EventReplay/ProviderList/WebhookList/HookList/HttpToolList/Snapshot/GitStatus/FileContent/AuditPage/UserSummary/BundleManifest…） |
+| 错误码 | 仅 `x-gateway-error-codes` 映射 | 操作级 `responses` 挂专属 code（409 MODEL_UNAVAILABLE / 429 STREAM_QUEUE_TIMEOUT / 413 PAYLOAD_TOO_LARGE…） |
+| 标签 | 5 个粗粒度 | **13 个领域标签**（session-core / conversation / observe / panel / agent / workspace / tools / config-models / config-automation / config-discovery / internal / admin / ops） |
+
+数据结构上从"一张大对象"拆成 5 张查表：`SUMMARIES` / `QUERIES` / `BODIES` / `ERRORS` / `RESPONSES`
+（+ `RESPONSE_SCHEMAS` 响应模型）。新增路由时补表即可，合约测试守住覆盖率。
+
+### 34.2 自省与门禁
+
+- `x-gateway-coverage`：运行时输出 `{operations, documented, summaryCoverage, queryParams, responseModels, tags}`，
+  集成端与 CI 都能直接读覆盖率。
+- `test/detailed-endpoints.test.ts` 断言：`summaryCoverage === 1`、`documented === operations`、
+  每个操作都有标签与 401 错误面、响应模型存在、查询参数已声明。**新增路由漏登记摘要 → 测试立刻红**。
+
+### 34.3 派生文档
+
+`docs/endpoint-index.md` 由运行时 openapi 派生（`bun run docs:endpoints`）：193 个操作按标签分组，
+带说明与查询参数。好处是文档不会与实现漂移——路由一改，重新生成即可。
+
+### 34.4 SOP 补强
+
+`docs/SOP.md` 增加第 8 章**任务手册**（按"要做什么"查步骤）：
+新用户开通模型 / 集成端最小闭环 / 暴露业务函数为 agent 工具 / 决策点拦截 /
+审计取证 / 扩容限额。每条都是可直接执行的命令序列。
+
+**验证**：`bun run lint` 0 诊断 · `bun run typecheck` 0 error · `bun run test` 296 pass / 0 fail（28 文件）。

@@ -11,6 +11,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "lint:fix": "biome check --write --unsafe",
+    "docs:endpoints": "bun scripts/gen-endpoint-index.mjs",
+    "docs:check": "bun scripts/check-coverage.mjs",
+    "smoke:docker": "bun scripts/docker-smoke.mjs",
     "test:parallel": "bun test"
   },
   "dependencies": {

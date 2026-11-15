@@ -87,27 +87,6 @@ export const GATEWAY_ERROR_CODES: Record<string, string> = {
 
 const ERROR_SCHEMA_REF = { $ref: "#/components/schemas/Error" };
 
-/** 通用响应（全部操作都默认携带；ROUTE_DOCS 可追加专属错误）。 */
-function baseResponses(): Record<string, unknown> {
-  return {
-    "200": { description: "OK", content: { "application/json": { schema: { type: "object" } } } },
-    "401": { description: "认证失败", content: { "application/json": { schema: ERROR_SCHEMA_REF } } },
-  };
-}
-
-/** 追加操作专属错误响应（code 形如 "409 SESSION_BUSY"）。 */
-function errorResponses(codes: string[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const code of codes) {
-    const [status, ...rest] = code.split(" ");
-    out[status] = {
-      description: rest.join(" "),
-      content: { "application/json": { schema: ERROR_SCHEMA_REF } },
-    };
-  }
-  return out;
-}
-
 /** 常用请求体（轻量 JSON Schema；复杂语义由 ROUTE_DOCS.summary 补充说明）。 */
 const BODY = {
   prompt: {
@@ -263,427 +242,1159 @@ const BODY = {
   },
 } as const;
 
-type RouteDoc = {
-  summary: string;
-  body?: { type: string; description?: string };
-  errors?: string[];
+/* ── 操作级文档表 ──────────────────────────────────────────────────────────
+ * 键 = "METHOD /openapi路径"（与 openapi.json 的 paths 一致）。
+ * SUMMARIES 覆盖**全部**操作（无族级兜底）；QUERIES 声明查询参数；ERRORS 声明专属错误码；
+ * BODIES 声明请求体；RESPONSES 指向 components.schemas 里的响应模型。
+ * 新增路由时四张表一起补——test/detailed-endpoints.test.ts 会守住覆盖率 100%。
+ */
+
+/** 查询参数声明。 */
+const QUERIES: Record<string, Array<{ name: string; description: string; schema?: Record<string, unknown> }>> = {
+  "GET /api/sessions": [
+    {
+      name: "status",
+      description: "会话状态过滤（active|archived|deleted，缺省 active）",
+      schema: { type: "string", enum: ["active", "archived", "deleted"] },
+    },
+    { name: "q", description: "标题/ID 模糊过滤（SQL LIKE）" },
+    { name: "page", description: "页码（0 起）", schema: { type: "integer", minimum: 0 } },
+    { name: "per_page", description: "每页条数（上限 200）", schema: { type: "integer", minimum: 1, maximum: 200 } },
+  ],
+  "GET /api/sessions/search": [
+    { name: "q", description: "正文关键词（≥2 字符）" },
+    { name: "limit", description: "返回条数上限（1-50）", schema: { type: "integer", minimum: 1, maximum: 50 } },
+    { name: "maxFiles", description: "扫描文件数上限（1-500）", schema: { type: "integer", minimum: 1, maximum: 500 } },
+  ],
+  "GET /api/sessions/{sid}/messages": [{ name: "since", description: "只返回序号 ≥ since 的消息" }],
+  "GET /api/sessions/{sid}/entries": [
+    { name: "type", description: "条目类型过滤（逗号分隔，如 message,model_change）" },
+    { name: "offset", description: "偏移" },
+    { name: "limit", description: "条数（1-2000）" },
+  ],
+  "GET /api/sessions/{sid}/events": [
+    { name: "types", description: "事件类型过滤（逗号分隔，后缀通配如 tool.*；replay.state 永远放行）" },
+  ],
+  "GET /api/sessions/{sid}/events/replay": [
+    { name: "since", description: "游标：只返回 seq > since 的事件" },
+    { name: "limit", description: "单次返回上限（1-500）", schema: { type: "integer", minimum: 1, maximum: 500 } },
+    { name: "types", description: "事件类型过滤（同 SSE）" },
+  ],
+  "GET /api/sessions/{sid}/context": [{ name: "contextWindow", description: "按指定窗口计算上下文占用" }],
+  "GET /api/sessions/{sid}/mcp/servers/{name}/resources": [
+    { name: "refresh", description: "设为 1 先向服务器刷新资源再返回" },
+  ],
+  "GET /api/me/models": [
+    { name: "find", description: "按 provider/modelId/name 模糊搜索" },
+    { name: "provider", description: "只看某个 provider" },
+    { name: "refresh", description: "设为 1 先刷新目录（联网 discovery）" },
+  ],
+  "GET /api/me/models/config": [
+    {
+      name: "format",
+      description: "设为 json 返回结构化视图（默认原文 YAML）",
+      schema: { type: "string", enum: ["json"] },
+    },
+  ],
+  "GET /api/me/agents/{name}": [
+    {
+      name: "format",
+      description: "设为 json 返回规范字段 + frontmatter（默认 markdown 原文）",
+      schema: { type: "string", enum: ["json"] },
+    },
+  ],
+  "GET /api/me/usage": [
+    { name: "group", description: "分桶维度", schema: { type: "string", enum: ["day", "model", "session"] } },
+    { name: "from", description: "起始日期（含）" },
+    { name: "to", description: "结束日期（含当天）" },
+  ],
+  "GET /internal/users/{uid}/usage": [
+    { name: "group", description: "分桶维度", schema: { type: "string", enum: ["day", "model", "session"] } },
+    { name: "from", description: "起始日期（含）" },
+    { name: "to", description: "结束日期（含当天）" },
+  ],
+  "GET /internal/audit": [
+    { name: "user", description: "按用户过滤（匹配 actor 或 on_behalf_of）" },
+    { name: "action", description: "按动作过滤" },
+    { name: "page", description: "页码（1 起）", schema: { type: "integer", minimum: 1 } },
+    { name: "per_page", description: "每页条数（1-200）", schema: { type: "integer", minimum: 1, maximum: 200 } },
+  ],
+  "DELETE /api/sessions/{sid}": [{ name: "confirm", description: "必须等于 sid 才执行删除" }],
+  "DELETE /internal/users/{uid}": [{ name: "confirm", description: "必须等于 uid 才执行级联删除" }],
+  "POST /internal/drain": [{ name: "off", description: "设为 1 恢复接单" }],
+  "POST /internal/maintenance/export": [
+    { name: "keepDrained", description: "设为 1 则导出后保持排空态（默认自动恢复接单）" },
+  ],
+  "GET /api/sessions/{sid}/file": [{ name: "path", description: "workspace 内相对路径" }],
+  "GET /api/sessions/{sid}/file/raw": [{ name: "path", description: "workspace 内相对路径" }],
+  "PUT /api/sessions/{sid}/file": [{ name: "path", description: "workspace 内相对路径" }],
+  "DELETE /api/sessions/{sid}/file": [{ name: "path", description: "workspace 内相对路径" }],
+  "GET /api/sessions/{sid}/tree": [
+    { name: "path", description: "子目录起点（缺省 workspace 根）" },
+    { name: "depth", description: "递归深度（默认 3，上限 8）", schema: { type: "integer" } },
+    { name: "max", description: "最大条目数（默认 2000）", schema: { type: "integer" } },
+  ],
+  "GET /api/sessions/{sid}/files/index": [{ name: "q", description: "按名模糊查询文件索引" }],
+  "GET /api/sessions/{sid}/git/log": [{ name: "limit", description: "提交条数（1-100）", schema: { type: "integer" } }],
+  "GET /api/sessions/{cmd}/git/diff": [],
+  "GET /api/sessions/{sid}/git/diff": [
+    { name: "path", description: "只看某个路径" },
+    { name: "staged", description: "设为 1 看已暂存区" },
+    { name: "stat", description: "设为 1 只出统计" },
+    { name: "base", description: "对比基线 ref（如 HEAD~1）" },
+  ],
+  "POST /api/sessions/{sid}/files/upload": [{ name: "path", description: "目标子目录（缺省 workspace 根）" }],
+};
+
+/** 专属错误码（状态 + code + 说明）。 */
+const ERRORS: Record<string, string[]> = {
+  "POST /api/sessions": ["409 SESSION_LIMIT", "403 PROVIDER_NOT_ALLOWED", "404 MODEL_NOT_FOUND", "503 DRAINING"],
+  "GET /api/sessions/search": ["400 BAD_REQUEST"],
+  "PATCH /api/sessions/{sid}": ["404 NOT_FOUND"],
+  "DELETE /api/sessions/{sid}": ["400 CONFIRM_REQUIRED", "404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/prompt": [
+    "400 BAD_REQUEST",
+    "409 SESSION_NOT_LIVE",
+    "409 MODEL_UNAVAILABLE",
+    "409 SESSION_STREAMING",
+    "429 STREAM_QUEUE_TIMEOUT",
+    "429 RATE_LIMITED",
+    "402 BUDGET_EXCEEDED",
+    "403 INPUT_BLOCKED",
+  ],
+  "POST /api/sessions/{sid}/steer": ["409 MODEL_UNAVAILABLE", "429 STREAM_QUEUE_TIMEOUT"],
+  "POST /api/sessions/{sid}/inject": ["400 BAD_REQUEST", "409 NOT_SUPPORTED", "409 INJECT_FAILED", "429 RATE_LIMITED"],
+  "POST /api/sessions/{sid}/business-events": [
+    "400 BAD_REQUEST",
+    "409 BUSINESS_EVENT_INJECT_FAILED",
+    "429 RATE_LIMITED",
+  ],
+  "POST /api/sessions/{sid}/approvals/{approvalId}": ["400 BAD_REQUEST", "404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/snapshots": ["409 SNAPSHOT_EMPTY"],
+  "POST /api/sessions/{sid}/snapshots/{snapId}/restore": [
+    "404 NOT_FOUND",
+    "409 SESSION_STREAMING",
+    "409 SNAPSHOT_EMPTY",
+  ],
+  "GET /api/sessions/{sid}/snapshots/{snapId}": ["404 NOT_FOUND"],
+  "DELETE /api/sessions/{sid}/snapshots/{snapId}": ["404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/fork": ["409 SESSION_NOT_LIVE", "409 FORK_FAILED", "409 FORK_REJECTED"],
+  "POST /api/sessions/{sid}/branch": ["400 BAD_REQUEST", "409 BRANCH_FAILED", "409 BRANCH_CANCELLED"],
+  "POST /api/sessions/{sid}/agents/{aid}/chat": ["404 NOT_FOUND", "409 AGENT_NOT_LIVE", "409 AGENT_CHAT_FAILED"],
+  "POST /api/sessions/{sid}/agents/{aid}/kill": ["404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/agents/{aid}/revive": [
+    "404 NOT_FOUND",
+    "409 AGENT_ALREADY_LIVE",
+    "409 NOT_REVIVABLE",
+    "409 REVIVE_FAILED",
+  ],
+  "POST /api/me/webhooks": ["400 BAD_REQUEST", "403 FORBIDDEN"],
+  "POST /api/sessions/{sid}/webhooks": ["400 BAD_REQUEST", "403 FORBIDDEN"],
+  "POST /api/me/hooks": ["400 BAD_REQUEST", "403 FORBIDDEN"],
+  "POST /api/sessions/{sid}/hooks": ["400 BAD_REQUEST", "403 FORBIDDEN"],
+  "PUT /api/me/tools/http/{name}": ["400 BAD_REQUEST", "400 INVALID_NAME", "403 FORBIDDEN", "413 PAYLOAD_TOO_LARGE"],
+  "PUT /api/sessions/{sid}/tools/http/{name}": [
+    "400 BAD_REQUEST",
+    "400 INVALID_NAME",
+    "403 FORBIDDEN",
+    "413 PAYLOAD_TOO_LARGE",
+  ],
+  "PUT /api/me/models/config": ["400 INVALID_CONFIG", "400 INVALID_PROVIDER", "400 INVALID_JSON"],
+  "GET /api/me/models/config": ["400 INVALID_YAML"],
+  "PUT /api/me/models/providers/{provider}": ["400 INVALID_CONFIG", "400 INVALID_PROVIDER", "404 NOT_FOUND"],
+  "GET /api/me/models/providers/{provider}": ["404 NOT_FOUND"],
+  "DELETE /api/me/models/providers/{provider}": ["404 NOT_FOUND"],
+  "POST /api/me/models/credentials": ["400 BAD_REQUEST"],
+  "POST /api/me/models/test": ["400 BAD_REQUEST", "404 MODEL_NOT_FOUND"],
+  "PUT /api/me/agents/{name}": ["400 INVALID_AGENT", "400 INVALID_FRONTMATTER", "400 INVALID_NAME"],
+  "POST /api/me/agents": ["400 INVALID_AGENT", "400 INVALID_NAME", "409 ALREADY_EXISTS"],
+  "GET /api/me/agents/{name}": ["404 NOT_FOUND"],
+  "PUT /api/me/approval": ["400 BAD_REQUEST"],
+  "PUT /api/me/providers/settings": ["400 BAD_REQUEST"],
+  "GET /api/me/providers": ["400 INVALID_YAML"],
+  "POST /api/sessions/validate": ["400 BAD_REQUEST", "413 PAYLOAD_TOO_LARGE"],
+  "POST /api/sessions/import": ["400 INVALID_SESSION_FILE", "409 ALREADY_EXISTS", "413 PAYLOAD_TOO_LARGE"],
+  "GET /api/sessions/{sid}/session-file": ["404 NOT_FOUND", "409 SESSION_NOT_LIVE", "413 PAYLOAD_TOO_LARGE"],
+  "PUT /api/sessions/{sid}/file": ["400 PATH_FORBIDDEN", "413 FILE_TOO_LARGE", "404 NOT_FOUND"],
+  "GET /api/sessions/{sid}/file": ["400 PATH_FORBIDDEN", "404 NOT_FOUND", "413 FILE_TOO_LARGE"],
+  "GET /api/sessions/{sid}/file/raw": ["404 NOT_FOUND", "416 INVALID_RANGE", "413 FILE_TOO_LARGE"],
+  "POST /api/sessions/{sid}/git/commit": ["409 NOT_A_GIT_REPO", "409 GIT_FAILED"],
+  "POST /api/sessions/{sid}/git/worktrees": ["400 PATH_FORBIDDEN", "409 NOT_A_GIT_REPO"],
+  "DELETE /api/sessions/{sid}/git/worktrees": ["400 PATH_FORBIDDEN", "409 NOT_A_GIT_REPO"],
+  "GET /api/sessions/{sid}/git/status": ["409 NOT_A_GIT_REPO"],
+  "GET /api/sessions/{sid}/git/log": ["409 NOT_A_GIT_REPO"],
+  "GET /api/sessions/{sid}/git/diff": ["409 NOT_A_GIT_REPO"],
+  "GET /api/sessions/{sid}/git/branches": ["409 NOT_A_GIT_REPO"],
+  "GET /api/sessions/{sid}/git/worktrees": ["409 NOT_A_GIT_REPO"],
+  "POST /api/sessions/{sid}/mcp/reload": ["404 NOT_FOUND", "409 MCP_DISABLED", "409 MCP_RELOAD_FAILED"],
+  "POST /api/sessions/{sid}/mcp/servers/{name}/reconnect": [
+    "404 NOT_FOUND",
+    "409 MCP_DISABLED",
+    "409 MCP_RECONNECT_FAILED",
+  ],
+  "GET /api/sessions/{sid}/mcp/servers": ["404 NOT_FOUND", "409 MCP_DISABLED"],
+  "GET /api/sessions/{sid}/mcp/servers/{name}/resources": ["404 NOT_FOUND", "409 MCP_DISABLED"],
+  "POST /api/sessions/{sid}/compact": ["409 SESSION_STREAMING", "409 COMPACT_FAILED"],
+  "POST /api/sessions/{sid}/follow-up": ["400 BAD_REQUEST", "409 FOLLOW_UP_FAILED", "429 STREAM_QUEUE_TIMEOUT"],
+  "POST /api/sessions/{sid}/messages/custom": ["400 BAD_REQUEST", "409 CUSTOM_MESSAGE_FAILED"],
+  "POST /api/sessions/{sid}/reset": ["409 SESSION_STREAMING", "409 RESET_FAILED"],
+  "POST /api/sessions/{sid}/handoff": ["409 SESSION_STREAMING", "409 HANDOFF_FAILED"],
+  "POST /api/sessions/{sid}/model": ["409 SESSION_STREAMING", "403 PROVIDER_NOT_ALLOWED", "404 MODEL_NOT_FOUND"],
+  "POST /api/sessions/{sid}/interrupt": ["400 BAD_REQUEST"],
+  "POST /api/sessions/{sid}/title/generate": ["409 NO_MESSAGES", "409 TITLE_FAILED"],
+  "POST /api/sessions/{sid}/file/mkdir": ["400 PATH_FORBIDDEN"],
+  "POST /api/sessions/{sid}/file/rename": ["400 PATH_FORBIDDEN", "404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/files/upload": ["400 PATH_FORBIDDEN", "413 FILE_TOO_LARGE"],
+  "PUT /api/sessions/{sid}/thinking": ["400 BAD_REQUEST", "409 NOT_SUPPORTED"],
+  "PUT /api/sessions/{sid}/todos": ["400 BAD_REQUEST", "409 NOT_SUPPORTED"],
+  "PUT /api/sessions/{sid}/tools": ["400 BAD_REQUEST"],
+  "PUT /api/sessions/{sid}/entries/{entryId}/label": ["400 BAD_REQUEST", "404 NOT_FOUND", "409 NOT_SUPPORTED"],
+  "DELETE /api/sessions/{sid}/entries/{entryId}/label": ["404 NOT_FOUND", "409 NOT_SUPPORTED"],
+  "POST /internal/users/{uid}/provision": ["403 TENANT_DISABLED"],
+  "DELETE /internal/users/{uid}": ["400 CONFIRM_REQUIRED"],
+  "POST /internal/trash/sessions/{sid}/restore": ["404 NOT_FOUND"],
+  "POST /internal/trash/users/{uid}/restore": ["404 NOT_FOUND"],
+  "POST /internal/maintenance/export": ["409 MAINTENANCE_BUSY", "500 EXPORT_FAILED"],
+  "POST /internal/maintenance/import": [
+    "400 MANIFEST_INVALID",
+    "400 SCHEMA_VERSION_MISMATCH",
+    "400 BUNDLE_INCOMPLETE",
+    "403 PATH_FORBIDDEN",
+    "409 MAINTENANCE_BUSY",
+    "500 IMPORT_FAILED",
+  ],
+  "PUT /admin/global/skills/{name}": ["400 INVALID_NAME"],
+  "PUT /admin/global/plugins/{name}": ["400 INVALID_NAME"],
+  "PUT /admin/global/mcp": ["400 INVALID_JSON"],
+  "PUT /api/me/mcp": ["400 INVALID_JSON"],
+  "PUT /api/me/mcp/settings": ["400 BAD_REQUEST", "400 INVALID_JSON"],
+  "PUT /api/me/skills/{name}": ["400 INVALID_NAME"],
+  "PUT /api/me/plugins/{name}": ["400 INVALID_NAME"],
+  "PUT /api/me/context-files/{name}": ["400 INVALID_NAME", "400 BAD_REQUEST", "413 PAYLOAD_TOO_LARGE"],
+  "PUT /api/me/model-roles": ["400 BAD_REQUEST"],
+  "POST /api/sessions/{sid}/share-link": ["404 NOT_FOUND"],
+  "DELETE /api/sessions/{sid}/share-link/{shareId}": ["404 NOT_FOUND"],
+  "DELETE /api/sessions/{sid}/queue": ["409 QUEUE_CLEAR_FAILED"],
+  "POST /api/sessions/{sid}/queue/remove": ["400 BAD_REQUEST"],
+  "POST /api/sessions/{sid}/jobs/{jobId}/cancel": ["404 NOT_FOUND"],
+  "POST /api/sessions/{sid}/restore-interrupted": ["409 SESSION_STREAMING"],
+  "POST /api/sessions/{sid}/fresh": ["409 SESSION_STREAMING", "409 FRESH_REJECTED"],
+};
+
+/** 请求体类型（对应 BODY 中的 schema；"text" 表示原文通道）。 */
+const BODIES: Record<string, string> = {
+  "POST /api/sessions": "createSession",
+  "POST /api/sessions/{sid}/prompt": "prompt",
+  "POST /api/sessions/{sid}/steer": "prompt",
+  "POST /api/sessions/{sid}/inject": "inject",
+  "POST /api/sessions/{sid}/business-events": "businessEvent",
+  "POST /api/sessions/{sid}/approvals/{approvalId}": "approvalDecision",
+  "POST /api/sessions/{sid}/model": "modelRef",
+  "POST /api/me/webhooks": "webhookRegister",
+  "POST /api/sessions/{sid}/webhooks": "webhookRegister",
+  "POST /api/me/hooks": "hookRegister",
+  "POST /api/sessions/{sid}/hooks": "hookRegister",
+  "PUT /api/me/tools/http/{name}": "httpToolRegister",
+  "PUT /api/sessions/{sid}/tools/http/{name}": "httpToolRegister",
+  "PUT /api/me/models/config": "modelsConfigJson",
+  "PUT /api/me/agents/{name}": "agentDefinition",
+  "POST /api/me/agents": "agentDefinition",
+  "POST /internal/maintenance/import": "migrationImport",
+  "POST /api/sessions/import": "importSession",
 };
 
 /**
- * 精选操作文档（集成端高频面逐条维护；键 = "METHOD /openapi路径"）。
- * 未覆盖的操作由 FAMILY_SUMMARY 兜底，不要求逐条登记。
+ * 全部 193 个操作的操作级摘要。
+ * 规则：一句话说清"做什么 + 关键约束"；不写与代码重复的字段罗列。
  */
-const ROUTE_DOCS: Record<string, RouteDoc> = {
+const SUMMARIES: Record<string, string> = {
   // ---- 会话生命周期 ----
-  "POST /api/sessions": {
-    summary: "建会话（幂等：Idempotency-Key 24h 重放）",
-    body: { type: "createSession" },
-    errors: ["409 SESSION_LIMIT", "403 PROVIDER_NOT_ALLOWED", "404 MODEL_NOT_FOUND", "503 DRAINING"],
-  },
-  "GET /api/sessions": { summary: "会话列表（分页 + 内联 live/usage/contextPercent/lastMessage）", errors: [] },
-  "GET /api/sessions/search": { summary: "会话正文搜索（扫 JSONL，回 snippet）", errors: ["400 BAD_REQUEST"] },
-  "GET /api/sessions/{sid}": { summary: "会话详情（元数据 + live 状态 + usage）", errors: ["404 NOT_FOUND"] },
-  "PATCH /api/sessions/{sid}": { summary: "改标题 / 归档↔恢复（归档即释放进程态）", errors: ["404 NOT_FOUND"] },
-  "DELETE /api/sessions/{sid}": {
-    summary: "删除会话（pre_delete 自动快照 → trash 30 天可找回）",
-    errors: ["400 CONFIRM_REQUIRED"],
-  },
+  "POST /api/sessions": "建会话：1:1 workspace、落 DB 行；幂等键 24h 内重放同响应",
+  "GET /api/sessions": "会话列表：分页 + 内联 live 状态/上下文占用/用量/末条消息预览",
+  "GET /api/sessions/search": "会话正文搜索：扫该用户 JSONL 命中行并回 snippet",
+  "GET /api/sessions/{sid}": "会话详情：元数据 + live 状态 + 用量汇总",
+  "PATCH /api/sessions/{sid}": "改标题或归档状态（归档即释放进程态，文件保留）",
+  "DELETE /api/sessions/{sid}": "删除会话：先打 pre_delete 快照再进 trash（30 天可找回）",
   // ---- 对话 ----
-  "POST /api/sessions/{sid}/prompt": {
-    summary: "发起 turn：202 准许即返回，结果走 SSE；wait=true 同步等终态",
-    body: { type: "prompt" },
-    errors: [
-      "400 BAD_REQUEST",
-      "409 SESSION_NOT_LIVE",
-      "409 MODEL_UNAVAILABLE",
-      "409 SESSION_STREAMING",
-      "429 STREAM_QUEUE_TIMEOUT",
-      "429 RATE_LIMITED",
-      "402 BUDGET_EXCEEDED",
-      "403 INPUT_BLOCKED",
-    ],
-  },
-  "POST /api/sessions/{sid}/steer": {
-    summary: "向正在流式的会话插入引导（不打断当前 turn）",
-    body: { type: "prompt" },
-    errors: ["409 MODEL_UNAVAILABLE", "429 STREAM_QUEUE_TIMEOUT"],
-  },
-  "POST /api/sessions/{sid}/abort": { summary: "中止当前 turn（202）", errors: [] },
-  "POST /api/sessions/{sid}/inject": {
-    summary: "提示词注入：context（不耗模型）/ user（触发 turn，可同步等待）",
-    body: { type: "inject" },
-    errors: ["400 BAD_REQUEST", "409 NOT_SUPPORTED", "409 INJECT_FAILED", "429 RATE_LIMITED"],
-  },
-  "POST /api/sessions/{sid}/business-events": {
-    summary: "业务事件注入：登记 → 广播 → 可选触发 turn（事件带 correlation 关联）",
-    body: { type: "businessEvent" },
-    errors: ["400 BAD_REQUEST", "409 BUSINESS_EVENT_INJECT_FAILED"],
-  },
-  // ---- 状态/观测 ----
-  "GET /api/sessions/{sid}/state": {
-    summary: "状态快照一次拿全（模型/思考/队列/工具/上下文/消息数）",
-    errors: ["409 SESSION_NOT_LIVE"],
-  },
-  "GET /api/sessions/{sid}/bootstrap": {
-    summary: "集成端初始化聚合：session/state/modes/approvals/commands/events 游标",
-    errors: [],
-  },
-  "GET /api/sessions/{sid}/status": { summary: "轻量轮询（status/model/approvals 计数/queue/latestSeq）", errors: [] },
-  "GET /api/sessions/{sid}/events": {
-    summary: "SSE 事件流（先订阅后 prompt；Last-Event-ID 重连；?types= 过滤）",
-    errors: [],
-  },
-  "GET /api/sessions/{sid}/events/replay": {
-    summary: "JSON 回放（SSE 断线补齐/轮询；环形缓冲最近 500 条）",
-    errors: [],
-  },
-  "GET /api/sessions/{sid}/usage": { summary: "会话用量（汇总 + 最近 50 turn 明细）", errors: [] },
+  "POST /api/sessions/{sid}/prompt": "发起 turn：202 准许即返回，过程与结果经 SSE；wait=true 可同步等终态",
+  "POST /api/sessions/{sid}/steer": "向正在流式的会话插话（不打断当前 turn）",
+  "POST /api/sessions/{sid}/abort": "中止当前 turn（立即返回 202）",
+  "POST /api/sessions/{sid}/inject": "提示词注入：context 不耗模型不触发 turn，user 触发 turn（计配额）",
+  "POST /api/sessions/{sid}/business-events": "注入业务事件：登记并广播，turn 内事件带 correlation 关联",
+  "POST /api/sessions/{sid}/follow-up": "追加 follow-up：排队到当前 turn 之后，不打断",
+  "POST /api/sessions/{sid}/messages/custom": "投递自定义消息：扩展协议通道（customType + content + deliverAs）",
+  // ---- 状态与观测 ----
+  "GET /api/sessions/{sid}/state": "状态快照一次拿全：模型/思考/队列/工具/上下文占用/消息数",
+  "GET /api/sessions/{sid}/bootstrap": "集成端初始化聚合：会话/状态/模式/待审批/命令/事件游标一次取全",
+  "GET /api/sessions/{sid}/status": "轻量轮询：状态/模型/待审批数/队列数/事件游标",
+  "GET /api/sessions/{sid}/events": "SSE 事件流：先订阅后 prompt；Last-Event-ID 重连，types 可过滤",
+  "GET /api/sessions/{sid}/events/replay": "事件 JSON 回放：按游标补齐（环形缓冲最近 500 条）",
+  "GET /api/sessions/{sid}/usage": "会话用量：汇总 + 最近 50 个 turn 明细",
+  "GET /api/sessions/{sid}/stats": "SDK 会话统计直出（工具调用数/耗时/缓存等）",
+  "GET /api/sessions/{sid}/messages": "会话消息历史（SDK messages 直读，since 可增量）",
+  "GET /api/sessions/{sid}/dump": "会话全文转写（纯文本）",
+  "GET /api/sessions/{sid}/integration": "本会话集成端点清单与契约文档位置（自描述）",
+  // ---- 能力面板 ----
+  "GET /api/sessions/{sid}/commands": "命令面板：斜杠命令 + 自定义命令 + MCP prompts + 模板",
+  "GET /api/sessions/{sid}/models": "模型选择器：可用模型目录 + 当前模型 + 思考档位",
+  "GET /api/sessions/{sid}/thinking": "思考档位：当前值 + 可选档位与 effort 选择器",
+  "PUT /api/sessions/{sid}/thinking": "设置思考档位（如 low/high；越界按模型上限收敛）",
+  "GET /api/sessions/{sid}/todos": "todo 面板：阶段列表",
+  "PUT /api/sessions/{sid}/todos": "手工编辑 todo 阶段（落 user_todo_edit 条目）",
+  "GET /api/sessions/{sid}/context": "上下文占用：窗口使用量与分桶明细",
+  "GET /api/sessions/{sid}/modes": "模式面板：plan/goal/压缩/重试/回退等运行态开关",
+  "GET /api/sessions/{sid}/plan": "计划模式：状态与引用的参考文件路径",
+  "GET /api/sessions/{sid}/maintenance": "维护状态：自动压缩/自动重试/缓存预热/提示缓存",
+  "GET /api/sessions/{sid}/session-tree": "分叉历史树：条目树 + 当前叶节点（网页可视化）",
+  "GET /api/sessions/{sid}/context-files": "上下文文件发现：用户级与项目级文件 + 是否已进入系统提示词",
+  "GET /api/sessions/{sid}/skills": "会话已加载的技能：全部 + 进入系统提示词的那些 + 加载告警",
+  // ---- 控制与生命周期 ----
+  "POST /api/sessions/{sid}/compact": "手动压缩上下文（需 idle）",
+  "POST /api/sessions/{sid}/reset": "重置会话上下文（清空对话，文件保留；需 idle）",
+  "POST /api/sessions/{sid}/handoff": "handoff：总结当前会话并移交到新上下文（需 idle）",
+  "POST /api/sessions/{sid}/restore-interrupted": "恢复被中断的 turn（进程崩溃后 JSONL 未闭合条目）",
+  "POST /api/sessions/{sid}/cycle-model": "轮换模型角色（Ctrl+P 语义；需 idle）",
+  "POST /api/sessions/{sid}/cycle-thinking": "轮换思考档位并返回新值",
+  "POST /api/sessions/{sid}/queue/remove": "移除队列中的单条消息（按文本 + 队列名）",
+  "DELETE /api/sessions/{sid}/queue": "清空消息队列（steering 与 follow-up）",
+  "POST /api/sessions/{sid}/name": "给会话命名（SDK 层名称，与网关 title 相互独立）",
+  "POST /api/sessions/{sid}/interrupt": "细粒度中断：按通道中止重试/压缩/handoff/分支摘要/bash/eval",
+  "POST /api/sessions/{sid}/title/generate": "按首条用户消息生成标题并回写会话 title",
+  "POST /api/sessions/{sid}/fresh": "开新会话（保留文件与工作区，丢弃上下文；需 idle）",
+  "POST /api/sessions/{sid}/export": "导出当前会话为 HTML（落在 workspace/exports/）",
+  "POST /api/sessions/{sid}/fork": "分叉：无 entryId 走血缘分叉（源不动），有 entryId 走 SDK 原地分支后换绑",
+  "POST /api/sessions/{sid}/branch": "从某条目分支（编辑点语义）：返回编辑器草稿并换绑到新会话",
+  "POST /api/sessions/{sid}/model": "会话内切模型（需 idle；切前自动快照，受 provider 白名单约束）",
+  // ---- 条目与快照 ----
+  "GET /api/sessions/{sid}/entries": "会话条目列表（fork/branch 的寻址键；可按类型过滤）",
+  "PUT /api/sessions/{sid}/entries/{entryId}/label": "给条目打标签（网页书签/标重点）",
+  "DELETE /api/sessions/{sid}/entries/{entryId}/label": "移除条目标签",
+  "GET /api/sessions/{sid}/snapshots": "快照列表（自动与手动，按时间倒序）",
+  "POST /api/sessions/{sid}/snapshots": "手动快照（幂等；零 turn 会话返回 SNAPSHOT_EMPTY）",
+  "GET /api/sessions/{sid}/snapshots/{snapId}": "单个快照元数据",
+  "DELETE /api/sessions/{sid}/snapshots/{snapId}": "删除快照（文件与记录一起清）",
+  "POST /api/sessions/{sid}/snapshots/{snapId}/restore":
+    "快照恢复：fork（默认，安全）或 rollback（同会话换文件，先打 pre_restore 快照）",
   // ---- 审批 ----
-  "GET /api/sessions/{sid}/approvals": { summary: "待审批清单（M6：超时后端自动拒绝）", errors: [] },
-  "POST /api/sessions/{sid}/approvals/{approvalId}": {
-    summary: "审批决定（404=已决/超时）",
-    body: { type: "approvalDecision" },
-    errors: ["400 BAD_REQUEST", "404 NOT_FOUND"],
-  },
-  // ---- 快照 ----
-  "GET /api/sessions/{sid}/snapshots": { summary: "快照列表", errors: [] },
-  "GET /api/sessions/{sid}/snapshots/{snapId}": {
-    summary: "单个快照元数据（id/trigger/entry_count/turn；文件路径不外泄）",
-    errors: ["404 NOT_FOUND"],
-  },
-  "POST /api/sessions/{sid}/snapshots": {
-    summary: "手动快照（幂等；零 turn 会话 409 SNAPSHOT_EMPTY）",
-    errors: ["409 SNAPSHOT_EMPTY"],
-  },
-  "POST /api/sessions/{sid}/snapshots/{snapId}/restore": {
-    summary: "快照恢复：fork（默认，安全）或 rollback（同 sid 换文件，先打 pre_restore 快照）",
-    errors: ["404 NOT_FOUND", "409 SESSION_STREAMING"],
-  },
-  "DELETE /api/sessions/{sid}/snapshots/{snapId}": { summary: "删除快照", errors: ["404 NOT_FOUND"] },
-  // ---- 派生 ----
-  "POST /api/sessions/{sid}/fork": {
-    summary: "分叉：无 entryId=血缘分叉；有 entryId=SDK 原地分支后换绑",
-    errors: ["409 SESSION_NOT_LIVE", "409 FORK_FAILED", "409 FORK_REJECTED"],
-  },
-  "POST /api/sessions/{sid}/branch": {
-    summary: "条目级编辑分支（返回编辑器草稿：选中消息文本/图片）",
-    errors: ["400 BAD_REQUEST", "409 BRANCH_FAILED", "409 BRANCH_CANCELLED"],
-  },
+  "GET /api/sessions/{sid}/approvals": "待审批工具调用清单（含当前审批策略；超时后端自动拒绝）",
+  "POST /api/sessions/{sid}/approvals/{approvalId}": "审批决定：放行或拒绝（404 表示已决或已超时）",
   // ---- Agent Hub ----
-  "GET /api/sessions/{sid}/agents": { summary: "子代理名册（live 状态）", errors: [] },
-  "GET /api/sessions/{sid}/agents/definitions": { summary: "本会话可见 agent 定义 + advertised 标记", errors: [] },
-  "POST /api/sessions/{sid}/agents/{aid}/chat": {
-    summary: "向子代理发消息（parked/killed 先自动复活）",
-    errors: ["404 NOT_FOUND", "409 AGENT_NOT_LIVE", "409 AGENT_CHAT_FAILED"],
-  },
-  "POST /api/sessions/{sid}/agents/{aid}/kill": {
-    summary: "中止子代理（tombstone；transcript 留盘可复活）",
-    errors: ["404 NOT_FOUND"],
-  },
-  "POST /api/sessions/{sid}/agents/{aid}/revive": {
-    summary: "从持久化 transcript 忠实重建子代理",
-    errors: ["404 NOT_FOUND", "409 AGENT_ALREADY_LIVE", "409 NOT_REVIVABLE", "409 REVIVE_FAILED"],
-  },
-  // ---- 回调与钩子 ----
-  "POST /api/me/webhooks": {
-    summary: "注册用户级回调（HMAC 签名推送；secret 仅创建响应返回一次）",
-    body: { type: "webhookRegister" },
-    errors: ["400 BAD_REQUEST", "403 FORBIDDEN"],
-  },
-  "POST /api/sessions/{sid}/webhooks": {
-    summary: "注册会话级回调（只收该会话事件）",
-    body: { type: "webhookRegister" },
-    errors: ["400 BAD_REQUEST", "403 FORBIDDEN"],
-  },
-  "POST /api/me/hooks": {
-    summary: "注册用户级生命周期钩子（notify 异步 / decide 同步决策）",
-    body: { type: "hookRegister" },
-    errors: ["400 BAD_REQUEST", "403 FORBIDDEN"],
-  },
-  "POST /api/sessions/{sid}/hooks": {
-    summary: "注册会话级钩子",
-    body: { type: "hookRegister" },
-    errors: ["400 BAD_REQUEST", "403 FORBIDDEN"],
-  },
-  "GET /api/me/hooks": { summary: "钩子清单 + 21 事件契约（decide 事件子集）", errors: [] },
-  // ---- HTTP 工具 ----
-  "PUT /api/me/tools/http/{name}": {
-    summary: "注册用户级 HTTP 工具（业务函数暴露给 agent；注册后热应用）",
-    body: { type: "httpToolRegister" },
-    errors: ["400 BAD_REQUEST", "400 INVALID_NAME", "403 FORBIDDEN", "413 PAYLOAD_TOO_LARGE"],
-  },
-  "PUT /api/sessions/{sid}/tools/http/{name}": {
-    summary: "注册会话级 HTTP 工具（同名覆盖用户级）",
-    body: { type: "webhookRegister" },
-    errors: ["400 BAD_REQUEST", "400 INVALID_NAME"],
-  },
-  // ---- 模型与配置（结构化 JSON，DESIGN §30） ----
-  "GET /api/me/models": { summary: "模型目录（含 cost/contextWindow 能力；?find= 搜索）", errors: [] },
-  "PUT /api/me/models/config": {
-    summary: "models.yml 写入：application/json=结构化（校验+格式化）；text/yaml=原文",
-    body: { type: "modelsConfigJson" },
-    errors: ["400 INVALID_CONFIG", "400 INVALID_PROVIDER", "400 INVALID_JSON"],
-  },
-  "GET /api/me/models/config": {
-    summary: "models.yml 原文；?format=json 返回结构化视图",
-    errors: ["400 INVALID_YAML"],
-  },
-  "PUT /api/me/models/providers/{provider}": {
-    summary: "单 provider 整体替换（省略字段即删除；其他 provider 不动）",
-    errors: ["400 INVALID_CONFIG", "400 INVALID_PROVIDER"],
-  },
-  "POST /api/me/models/credentials": {
-    summary: "凭据注入（合并进 models.yml 的 provider.apiKey）",
-    errors: ["400 BAD_REQUEST"],
-  },
-  "POST /api/me/models/test": {
-    summary: "模型探针：独立内存会话发一条探针，测 TTFT/总时长/错误",
-    errors: ["400 BAD_REQUEST", "404 MODEL_NOT_FOUND"],
-  },
-  "GET /api/me/config/schema": {
-    summary: "配置自描述：provider/model/agent 字段清单与示例（前端表单生成用）",
-    errors: [],
-  },
-  "PUT /api/me/agents/{name}": {
-    summary: "Agent 定义写入：application/json=结构化（字段白名单）；text/markdown=原文",
-    body: { type: "agentDefinition" },
-    errors: ["400 INVALID_AGENT", "400 INVALID_FRONTMATTER", "400 INVALID_NAME"],
-  },
-  "POST /api/me/agents": {
-    summary: "创建 Agent 定义（name 取自 body；同名 409）",
-    errors: ["400 INVALID_AGENT", "400 INVALID_NAME", "409 ALREADY_EXISTS"],
-  },
-  "GET /api/me/agents/{name}": {
-    summary: "Agent 定义原文；?format=json 返回规范字段+frontmatter",
-    errors: ["404 NOT_FOUND"],
-  },
-  "PUT /api/me/approval": {
-    summary: "审批策略：mode（4 档）+ 按工具 policies（整体替换）",
-    errors: ["400 BAD_REQUEST"],
-  },
-  "PUT /api/me/providers/settings": {
-    summary: "disabledProviders 开关（对新会话生效；live 会话保留 registry）",
-    errors: ["400 BAD_REQUEST"],
-  },
-  "GET /api/me/providers": {
-    summary: "Provider 结构化视图（configured/available/disabled；apiKey 不返回明文）",
-    errors: ["400 INVALID_YAML"],
-  },
-  "GET /api/me/limits": { summary: "配额：限额/本月用量/预算余额/RPM 窗口", errors: [] },
-  // ---- 会话文件/导入 ----
-  "POST /api/sessions/validate": {
-    summary: "会话 JSONL dry-run 校验（不落库）",
-    errors: ["400 BAD_REQUEST", "413 PAYLOAD_TOO_LARGE"],
-  },
-  "POST /api/sessions/import": {
-    summary: "导入会话 JSONL（校验 → 补 model_change → 建文件与 DB 行）",
-    body: { type: "string", description: "JSONL 原文" },
-    errors: ["400 INVALID_SESSION_FILE", "409 ALREADY_EXISTS", "413 PAYLOAD_TOO_LARGE"],
-  },
-  "GET /api/sessions/{sid}/session-file": {
-    summary: "下载原始 JSONL（NDJSON attachment）",
-    errors: ["404 NOT_FOUND", "409 SESSION_NOT_LIVE", "413 PAYLOAD_TOO_LARGE"],
-  },
-  // ---- 文件/git ----
-  "GET /api/sessions/{sid}/file": {
-    summary: "读文件（JSON 信封 {path,encoding,content,size}）",
-    errors: ["400 BAD_REQUEST", "404 NOT_FOUND"],
-  },
-  "PUT /api/sessions/{sid}/file": {
-    summary: "写文件（utf8/base64；≤5MB）",
-    errors: ["400 PATH_FORBIDDEN", "413 FILE_TOO_LARGE"],
-  },
-  "GET /api/sessions/{sid}/file/raw": {
-    summary: "原始字节流（Range 支持拖动；图像/PDF 直接预览）",
-    errors: ["404 NOT_FOUND", "416 INVALID_RANGE"],
-  },
-  "POST /api/sessions/{sid}/git/commit": {
-    summary: "stage（all 或路径白名单）后提交",
-    errors: ["409 NOT_A_GIT_REPO", "409 GIT_FAILED"],
-  },
-  "POST /api/sessions/{sid}/git/worktrees": {
-    summary: "新建 worktree（路径必须位于用户数据根内）",
-    errors: ["400 PATH_FORBIDDEN", "409 NOT_A_GIT_REPO"],
-  },
+  "GET /api/sessions/{sid}/agents": "子代理名册（含 live 状态）",
+  "GET /api/sessions/{sid}/agents/definitions": "本会话可见的 agent 定义 + 是否出现在系统提示词",
+  "GET /api/sessions/{sid}/agents/{aid}": "子代理详情（任务描述、状态、工具等）",
+  "GET /api/sessions/{sid}/agents/{aid}/transcript": "子代理 transcript 原文（限用户根内，≤4MB）",
+  "POST /api/sessions/{sid}/agents/{aid}/chat": "给子代理发消息（已停止的先自动复活）",
+  "POST /api/sessions/{sid}/agents/{aid}/kill": "中止子代理（留 tombstone；transcript 留盘可复活）",
+  "POST /api/sessions/{sid}/agents/{aid}/revive": "从持久化 transcript 忠实重建子代理",
+  // ---- 异步任务 ----
+  "GET /api/sessions/{sid}/jobs": "异步任务树与快照（bash 后台 / task 子代理）",
+  "GET /api/sessions/{sid}/jobs/{jobId}": "单个异步任务详情",
+  "POST /api/sessions/{sid}/jobs/{jobId}/cancel": "取消异步任务",
+  // ---- 运行时工具与 MCP ----
+  "GET /api/sessions/{sid}/tools": "运行时生效的工具名（active / all）",
+  "PUT /api/sessions/{sid}/tools": "调整运行时生效工具集",
+  "GET /api/sessions/{sid}/tools/info": "工具能力发现：描述、参数名、来源（内置/MCP/自定义）",
+  "GET /api/sessions/{sid}/tools/http": "本会话可见的业务 HTTP 工具（会话级 + 用户级）",
+  "PUT /api/sessions/{sid}/tools/http/{name}": "注册会话级业务 HTTP 工具（同名覆盖用户级；注册后热生效）",
+  "DELETE /api/sessions/{sid}/tools/http/{name}": "注销会话级业务 HTTP 工具",
+  "GET /api/sessions/{sid}/mcp": "MCP 汇总：已连接服务器与工具名",
+  "GET /api/sessions/{sid}/mcp/servers": "MCP 服务器明细：状态/传输/工具数/来源",
+  "POST /api/sessions/{sid}/mcp/servers/{name}/reconnect": "重连单个 MCP 服务器（不重新发现）",
+  "GET /api/sessions/{sid}/mcp/servers/{name}/resources": "MCP 服务器资源列表",
+  "POST /api/sessions/{sid}/mcp/reload": "重新对账项目级 MCP 配置并刷新全部工具（重放业务工具）",
+  "GET /api/sessions/{sid}/lsp": "LSP 服务器清单",
+  // ---- 文件与 git ----
+  "GET /api/sessions/{sid}/tree": "workspace 文件树（限深限条数）",
+  "GET /api/sessions/{sid}/files/index": "workspace 文件索引与按名搜索",
+  "GET /api/sessions/{sid}/file": "读文件（JSON 信封：path/encoding/content/size）",
+  "GET /api/sessions/{sid}/file/raw": "原始字节流（支持 Range，图像/PDF 直接预览）",
+  "PUT /api/sessions/{sid}/file": "写文件（utf8 或 base64，≤5MB）",
+  "DELETE /api/sessions/{sid}/file": "删除文件或目录",
+  "POST /api/sessions/{sid}/file/mkdir": "创建目录（workspace 内相对路径）",
+  "POST /api/sessions/{sid}/file/rename": "重命名或移动",
+  "POST /api/sessions/{sid}/files/upload": "上传文件（multipart，字段名 files；只取 basename 防穿越）",
+  "GET /api/sessions/{sid}/git/status": "git 状态：分支/上游/领先落后/逐文件变更",
+  "GET /api/sessions/{sid}/git/log": "git 提交历史",
+  "GET /api/sessions/{sid}/git/diff": "git 差异（可限定路径/暂存区/基线 ref/仅统计）",
+  "GET /api/sessions/{sid}/git/branches": "git 分支列表（本地 + 远程，标记当前分支）",
+  "POST /api/sessions/{sid}/git/commit": "暂存并提交（add 可为 all 或路径白名单）",
+  "GET /api/sessions/{sid}/git/worktrees": "git worktree 列表",
+  "POST /api/sessions/{sid}/git/worktrees": "新建 git worktree（路径必须落在用户数据根内）",
+  "DELETE /api/sessions/{sid}/git/worktrees": "移除 git worktree",
+  // ---- 会话级订阅 ----
+  "GET /api/sessions/{sid}/webhooks": "本会话的回调订阅（secret 不外泄）",
+  "POST /api/sessions/{sid}/webhooks": "注册会话级回调（只收该会话事件；HMAC 签名推送）",
+  "DELETE /api/sessions/{sid}/webhooks/{id}": "注销会话级回调",
+  "GET /api/sessions/{sid}/hooks": "本会话的生命周期钩子 + 事件契约",
+  "POST /api/sessions/{sid}/hooks": "注册会话级生命周期钩子（notify 通知 / decide 同步决策）",
+  "DELETE /api/sessions/{sid}/hooks/{id}": "注销会话级钩子",
+  // ---- 分享 ----
+  "POST /api/sessions/{sid}/share-link": "签发分享链接（view 只读 / control 可对话；token 仅返回一次）",
+  "GET /api/sessions/{sid}/share-links": "本会话的分享链接列表",
+  "DELETE /api/sessions/{sid}/share-link/{shareId}": "吊销分享链接",
+  // ---- 会话文件导入导出 ----
+  "POST /api/sessions/validate": "会话 JSONL 干跑校验（不落库）",
+  "POST /api/sessions/import": "导入会话 JSONL：校验 → 补 model_change → 写文件与 DB 行",
+  "GET /api/sessions/{sid}/session-file": "下载会话原始 JSONL（NDJSON 附件）",
+  // ---- 用户级：模型与 Provider ----
+  "GET /api/me/models": "模型目录（带成本与上下文窗口；find/provider/refresh 可用）",
+  "GET /api/me/models/config": "models.yml 原文（text/yaml）；format=json 返回结构化视图",
+  "PUT /api/me/models/config": "写 models.yml：application/json 为结构化（校验并格式化），其余按原文写入",
+  "GET /api/me/models/providers/{provider}": "单个 provider 配置",
+  "PUT /api/me/models/providers/{provider}": "整体替换单个 provider（省略字段即删除；其他 provider 不受影响）",
+  "DELETE /api/me/models/providers/{provider}": "删除单个 provider",
+  "POST /api/me/models/credentials": "注入凭据：把 API key 合并进 models.yml 对应 provider",
+  "POST /api/me/models/test": "模型探针：独立内存会话发一条探针，测首字延迟与总耗时",
+  "GET /api/me/providers": "Provider 结构化视图（configured/available/disabled；不返回 apiKey 明文）",
+  "GET /api/me/providers/settings": "provider 开关设置（disabledProviders）",
+  "PUT /api/me/providers/settings": "设置 provider 开关（对新会话生效；live 会话保留原 registry）",
+  "GET /api/me/model-roles": "模型角色配置（@role 别名与轮转顺序）",
+  "PUT /api/me/model-roles": "设置模型角色与轮转顺序（写用户级 config.yml）",
+  // ---- 用户级：审批 ----
+  "GET /api/me/approval": "审批策略：模式 + 按工具的策略表",
+  "PUT /api/me/approval": "设置审批策略（模式四选一 + 工具策略整体替换）",
+  "GET /api/me/approval/grants": "持久授权清单（always-ask-cached 已记住的批准）",
+  "DELETE /api/me/approval/grants": "清空持久授权清单",
+  // ---- 用户级：Agent 与上下文 ----
+  "GET /api/me/agents": "用户级 agent 定义列表（含 frontmatter 解析结果）",
+  "GET /api/me/agents/{name}": "agent 定义原文；format=json 返回规范字段 + frontmatter",
+  "PUT /api/me/agents/{name}": "写 agent 定义：application/json 结构化（字段白名单）或 text/markdown 原文",
+  "POST /api/me/agents": "创建 agent 定义（name 取自 body；同名 409）",
+  "DELETE /api/me/agents/{name}": "删除 agent 定义",
+  "GET /api/me/context-files": "用户级上下文文件清单（AGENTS/RULES/APPEND_SYSTEM/SYSTEM）",
+  "GET /api/me/context-files/{name}": "读取单个上下文文件",
+  "PUT /api/me/context-files/{name}": "写用户级上下文文件（新会话创建时进入系统提示词）",
+  "DELETE /api/me/context-files/{name}": "删除用户级上下文文件",
+  // ---- 用户级：订阅与工具 ----
+  "GET /api/me/webhooks": "用户级回调订阅列表（跨全部会话）",
+  "POST /api/me/webhooks": "注册用户级回调（HMAC 签名推送；secret 仅创建响应返回一次）",
+  "DELETE /api/me/webhooks/{id}": "注销用户级回调",
+  "GET /api/me/hooks": "用户级钩子列表 + 21 事件契约（区分决策型与通知型）",
+  "POST /api/me/hooks": "注册用户级生命周期钩子（对该用户全部会话生效）",
+  "DELETE /api/me/hooks/{id}": "注销用户级钩子",
+  "GET /api/me/tools/http": "用户级业务 HTTP 工具列表",
+  "PUT /api/me/tools/http/{name}": "注册用户级业务 HTTP 工具（注册后热应用到该用户全部 live 会话）",
+  "DELETE /api/me/tools/http/{name}": "注销用户级业务 HTTP 工具",
+  // ---- 用户级：MCP / 发现项 / 用量 ----
+  "GET /api/me/mcp": "MCP 原始配置（agent/mcp.json 原文）",
+  "PUT /api/me/mcp": "写 MCP 原始配置（仅挡语法错误，结构由 omp 发现期校验）",
+  "GET /api/me/mcp/settings": "MCP 用户级开关（disabledServers 优先级最高）",
+  "PUT /api/me/mcp/settings": "设置 MCP 用户级开关（写 agent/mcp.json）",
+  "GET /api/me/skills": "用户可见技能清单（私有 + 全局，带 scope 标签）",
+  "GET /api/me/skills/{name}": "读取技能原文（SKILL.md）",
+  "PUT /api/me/skills/{name}": "写用户级技能（name + description + 正文）",
+  "DELETE /api/me/skills/{name}": "删除用户级技能",
+  "GET /api/me/plugins": "用户可见插件清单（私有 + 全局，带 scope 标签）",
+  "GET /api/me/plugins/{name}": "读取插件源码",
+  "PUT /api/me/plugins/{name}": "写用户级插件（≤2MB）",
+  "DELETE /api/me/plugins/{name}": "删除用户级插件",
+  "GET /api/me/limits": "配额视图：限额 / 本月用量 / 预算余额 / RPM 窗口",
+  "GET /api/me/usage": "用户用量聚合（按天/模型/会话分桶）",
+  "GET /api/me/projects": "按仓库聚合会话（origin url 维度）",
+  "GET /api/me/config/schema": "配置自描述：provider/model/agent 字段清单与示例（供前端生成表单）",
   // ---- 内部契约 ----
-  "POST /internal/users/{uid}/provision": { summary: "懒 provision：建目录骨架 + 租户行（幂等）", errors: [] },
-  "PATCH /internal/users/{uid}/limits": {
-    summary: "限额 PATCH（合并语义：maxSessions/maxConcurrent/allowedProviders）",
-    errors: [],
-  },
-  "DELETE /internal/users/{uid}": {
-    summary: "级联删除：dispose 全部 live → deleted（30d trash 后物理清除）",
-    errors: ["400 CONFIRM_REQUIRED"],
-  },
-  "GET /internal/trash": { summary: "trash 列表（会话/租户，30d 窗口）", errors: [] },
-  "POST /internal/trash/sessions/{sid}/restore": {
-    summary: "trash 找回会话（清 deleted_at，状态回 active）",
-    errors: ["404 NOT_FOUND"],
-  },
-  "POST /internal/drain": {
-    summary: "滚动发布排空：开启后建会话 503、healthz 503（再次调用同一端点关闭）",
-    errors: [],
-  },
-  "POST /internal/maintenance/export": {
-    summary: "环境导出：drain → dispose 全部 live → VACUUM INTO + 文件树 + manifest（sha256/计数）",
-    errors: ["409 MAINTENANCE_BUSY", "500 EXPORT_FAILED"],
-  },
-  "POST /internal/maintenance/import": {
-    summary: "环境导入：manifest/sha256 校验 → 原子换树 → 重开库 → 计数对账；失败自动回滚",
-    body: { type: "migrationImport" },
-    errors: [
-      "400 MANIFEST_INVALID",
-      "400 SCHEMA_VERSION_MISMATCH",
-      "400 BUNDLE_INCOMPLETE",
-      "403 PATH_FORBIDDEN",
-      "500 IMPORT_FAILED",
-    ],
-  },
-  // ---- 管理 ----
-  "PUT /admin/global/skills/{name}": {
-    summary: "全局 skill 写入（所有用户可见；用户同名覆盖）",
-    errors: ["400 INVALID_NAME"],
-  },
-  "PUT /admin/global/mcp": { summary: "全局 MCP 配置（合成进各用户 workspace）", errors: ["400 INVALID_JSON"] },
+  "POST /internal/users/{uid}/provision": "懒 provision：建用户目录骨架与租户行（幂等）",
+  "GET /internal/users/{uid}/summary": "用户状态：租户信息、限额、活跃/live/streaming 会话数",
+  "GET /internal/users/{uid}/usage": "用户用量聚合（上游计费或展示用）",
+  "PATCH /internal/users/{uid}/limits": "调整用户限额（合并语义：maxSessions/maxConcurrent/allowedProviders）",
+  "DELETE /internal/users/{uid}": "级联删除用户：释放全部 live 会话并标记 deleted（30 天后物理清除）",
+  "GET /internal/users/{uid}/webhooks": "用户的回调订阅（内部视角）",
+  "POST /internal/users/{uid}/webhooks": "为用户注册回调（内部视角）",
+  "DELETE /internal/webhooks/{id}": "注销用户回调（内部视角）",
+  "GET /internal/trash": "回收站列表：已删会话与租户（30 天窗口）",
+  "POST /internal/trash/sessions/{sid}/restore": "找回已删会话（清 deleted_at，状态回 active）",
+  "POST /internal/trash/users/{uid}/restore": "找回已删租户",
+  "GET /internal/audit": "审计查询：按用户与动作过滤，分页返回",
+  "POST /internal/drain": "排空开关：开启后拒新会话且健康检查失败（滚动发布摘流量）",
+  "POST /internal/maintenance/export": "环境导出：静默实例 → 一致 DB 快照 + 文件树 + manifest（校验和/计数/文件清单）",
+  "POST /internal/maintenance/import": "环境导入：校验 manifest → 复制覆盖 → 按文件清单清冗余 → 换库重开 → 计数对账",
+  // ---- 全局管理 ----
+  "GET /admin/global/skills": "全局技能清单（所有用户可见，用户同名覆盖）",
+  "GET /admin/global/skills/{name}": "读取全局技能原文",
+  "PUT /admin/global/skills/{name}": "写全局技能（所有用户可见）",
+  "DELETE /admin/global/skills/{name}": "删除全局技能",
+  "GET /admin/global/plugins": "全局插件清单",
+  "GET /admin/global/plugins/{name}": "读取全局插件源码",
+  "PUT /admin/global/plugins/{name}": "写全局插件（所有用户可见）",
+  "DELETE /admin/global/plugins/{name}": "删除全局插件",
+  "GET /admin/global/mcp": "全局 MCP 配置",
+  "PUT /admin/global/mcp": "写全局 MCP 配置（合成进各用户 workspace）",
+  // ---- 运维 ----
+  "GET /healthz": "存活探针（排空期间返回 503 以摘流量）",
+  "GET /readyz": "就绪探针（数据根可写）",
+  "GET /metrics": "Prometheus 指标：会话数、流式槽位、用量与成本、限流与预算拒绝",
+  "GET /openapi.json": "本契约文档（OpenAPI 3.1）",
 };
 
-/**
- * 族摘要（longest-prefix 兜底）：未进 ROUTE_DOCS 的操作按前缀取摘要，
- * 保证 /openapi.json 里没有 "GET /path" 这种零信息条目。
- */
-const FAMILY_SUMMARY: Array<[string, string]> = [
-  ["/api/me/context-files", "用户级上下文文件（AGENTS/RULES/APPEND_SYSTEM/SYSTEM）"],
-  ["/api/me/mcp/settings", "MCP 用户级开关（disabledServers 优先级最高）"],
-  ["/api/me/mcp", "MCP 原始配置读写"],
-  ["/api/me/skills", "skill 清单与用户级 CRUD"],
-  ["/api/me/plugins", "插件清单与用户级 CRUD"],
-  ["/api/me/model-roles", "模型角色（@role 别名与 cycleOrder）"],
-  ["/api/me/usage", "用户用量聚合（day/model/session 分桶）"],
-  ["/api/me/projects", "按仓库聚合会话（origin url 维度）"],
-  ["/api/me/approval/grants", "持久授权清单（approval-cache.db 直读/清空）"],
-  ["/api/me/approval", "审批策略读写"],
-  ["/api/me/webhooks", "用户级回调管理"],
-  ["/api/me/hooks", "用户级钩子管理"],
-  ["/api/me/tools/http", "用户级 HTTP 工具管理"],
-  ["/api/me/agents", "Agent 定义管理（结构化 JSON/原文双通道）"],
-  ["/api/me/models", "模型目录与配置"],
-  ["/api/me/providers", "Provider 视图与开关"],
-  ["/api/me", "用户级配置与集成资源"],
-  ["/api/sessions/{sid}/entries", "会话条目（fork/branch 寻址键）"],
-  ["/api/sessions/{sid}/files", "workspace 文件"],
-  ["/api/sessions/{sid}/file", "workspace 文件读写"],
-  ["/api/sessions/{sid}/git", "workspace git"],
-  ["/api/sessions/{sid}/jobs", "异步任务"],
-  ["/api/sessions/{sid}/agents", "Agent Hub"],
-  ["/api/sessions/{sid}/mcp", "MCP 明细与重连/资源"],
-  ["/api/sessions/{sid}/messages", "消息与自定义消息通道"],
-  ["/api/sessions/{sid}/queue", "消息队列管理"],
-  ["/api/sessions/{sid}/share-link", "分享链接"],
-  ["/api/sessions/{sid}/snapshots", "快照"],
-  ["/api/sessions/{sid}/tools", "运行时工具集与 HTTP 工具"],
-  ["/api/sessions/{sid}/webhooks", "会话级回调"],
-  ["/api/sessions/{sid}/hooks", "会话级钩子"],
-  ["/api/sessions/{sid}/thinking", "思考档位"],
-  ["/api/sessions/{sid}/todos", "todo 面板"],
-  ["/api/sessions/{sid}/models", "模型选择器"],
-  ["/api/sessions/{sid}", "会话能力面（live 语义：未命中按文件复活）"],
-  ["/internal/users/{uid}/usage", "上游计费/展示用量聚合"],
-  ["/internal/users/{uid}/summary", "用户状态与 live/streaming 计数"],
-  ["/internal/users/{uid}/webhooks", "用户回调（内部视角）"],
-  ["/internal/webhooks", "用户回调（内部视角：注册/列表/注销）"],
-  ["/internal/users/{uid}", "用户生命周期（provision/summary/limits/级联删除）"],
-  ["/internal/trash", "trash 找回"],
-  ["/internal/audit", "审计查询"],
-  ["/internal/maintenance", "环境迁移"],
-  ["/admin/global", "全局资源管理（所有用户可见）"],
-  ["/healthz", "存活探针"],
-  ["/readyz", "就绪探针（数据根可写 + DB 可用）"],
-  ["/metrics", "Prometheus 指标"],
-  ["/openapi.json", "本契约文档"],
+/** 响应模型（指向 components.schemas）。 */
+const RESPONSES: Record<string, string> = {
+  "POST /api/sessions": "SessionCreated",
+  "GET /api/sessions": "SessionList",
+  "GET /api/sessions/search": "SessionSearch",
+  "GET /api/sessions/{sid}": "Session",
+  "PATCH /api/sessions/{sid}": "SessionPatchResult",
+  "DELETE /api/sessions/{sid}": "SessionDeleteResult",
+  "GET /api/sessions/{sid}/state": "SessionState",
+  "GET /api/sessions/{sid}/bootstrap": "Bootstrap",
+  "GET /api/sessions/{sid}/status": "SessionStatus",
+  "GET /api/sessions/{sid}/events": "EventStream",
+  "GET /api/sessions/{sid}/events/replay": "EventReplay",
+  "GET /api/sessions/{sid}/usage": "SessionUsage",
+  "GET /api/sessions/{sid}/agents": "AgentRoster",
+  "GET /api/sessions/{sid}/agents/definitions": "AgentDefinitions",
+  "GET /api/sessions/{sid}/approvals": "ApprovalList",
+  "GET /api/sessions/{sid}/snapshots": "SnapshotList",
+  "GET /api/sessions/{sid}/snapshots/{snapId}": "Snapshot",
+  "GET /api/sessions/{sid}/models": "ModelPicker",
+  "GET /api/me/models": "ModelCatalog",
+  "GET /api/me/providers": "ProviderList",
+  "GET /api/me/models/config": "ModelsConfig",
+  "GET /api/me/webhooks": "WebhookList",
+  "GET /api/sessions/{sid}/webhooks": "WebhookList",
+  "GET /api/me/hooks": "HookList",
+  "GET /api/sessions/{sid}/hooks": "HookList",
+  "GET /api/me/tools/http": "HttpToolList",
+  "GET /api/sessions/{sid}/tools/http": "HttpToolList",
+  "GET /api/me/agents": "AgentDefinitionList",
+  "GET /api/me/agents/{name}": "AgentDefinition",
+  "GET /api/me/limits": "Limits",
+  "GET /api/me/usage": "UsageBuckets",
+  "GET /api/me/skills": "SkillList",
+  "GET /api/me/plugins": "PluginList",
+  "GET /api/me/context-files": "ContextFileList",
+  "GET /api/me/config/schema": "ConfigSchema",
+  "GET /api/sessions/{sid}/file": "FileContent",
+  "GET /api/sessions/{sid}/tree": "FileTree",
+  "GET /api/sessions/{sid}/git/status": "GitStatus",
+  "GET /api/sessions/{sid}/git/log": "GitLog",
+  "GET /api/sessions/{sid}/git/diff": "GitDiff",
+  "GET /api/sessions/{sid}/jobs": "JobTree",
+  "GET /internal/audit": "AuditPage",
+  "GET /internal/users/{uid}/summary": "UserSummary",
+  "GET /internal/trash": "TrashList",
+  "POST /internal/maintenance/export": "BundleManifest",
+  "POST /internal/maintenance/import": "ImportResult",
+};
+
+/** 响应模型定义（components.schemas）。 */
+const RESPONSE_SCHEMAS: Record<string, Record<string, unknown>> = {
+  SessionCreated: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      workspaceId: { type: "string", description: "恒等于会话 id（1:1）" },
+      status: { type: "string" },
+      model: {
+        type: "object",
+        nullable: true,
+        properties: { provider: { type: "string" }, modelId: { type: "string" } },
+      },
+      warnings: { type: "array", items: { type: "string" }, description: "如显式模型不可用已回落" },
+    },
+  },
+  SessionList: {
+    type: "object",
+    properties: {
+      sessions: { type: "array", items: { $ref: "#/components/schemas/Session" } },
+      total: { type: "integer" },
+      page: { type: "integer" },
+      perPage: { type: "integer" },
+    },
+  },
+  Session: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      user_id: { type: "string" },
+      workspace_id: { type: "string" },
+      parent_id: { type: "string", nullable: true, description: "分叉血缘" },
+      title: { type: "string" },
+      status: { type: "string", enum: ["active", "archived", "deleted"] },
+      session_file: { type: "string", nullable: true },
+      model_provider: { type: "string", nullable: true },
+      model_id: { type: "string", nullable: true },
+      live: {
+        type: "object",
+        properties: { present: { type: "boolean" }, status: { type: "string", nullable: true } },
+      },
+      usage: { type: "object", additionalProperties: true },
+    },
+  },
+  SessionSearch: {
+    type: "object",
+    properties: {
+      q: { type: "string" },
+      total: { type: "integer" },
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            sessionId: { type: "string" },
+            title: { type: "string", nullable: true },
+            status: { type: "string" },
+            matches: { type: "integer" },
+            snippet: { type: "string", nullable: true },
+          },
+        },
+      },
+    },
+  },
+  SessionPatchResult: { type: "object", properties: { id: { type: "string" }, status: { type: "string" } } },
+  SessionDeleteResult: { type: "object", properties: { id: { type: "string" }, status: { type: "string" } } },
+  SessionState: {
+    type: "object",
+    properties: {
+      sessionId: { type: "string" },
+      status: { type: "string", enum: ["idle", "streaming"] },
+      model: {
+        type: "object",
+        nullable: true,
+        properties: { provider: { type: "string" }, modelId: { type: "string" } },
+      },
+      thinkingLevel: { type: "string", nullable: true },
+      availableThinkingLevels: { type: "array", items: { type: "string" } },
+      queue: { type: "object", additionalProperties: true },
+      tools: {
+        type: "object",
+        properties: {
+          active: { type: "array", items: { type: "string" } },
+          all: { type: "array", items: { type: "string" } },
+        },
+      },
+      contextUsage: { type: "object", nullable: true },
+      messageCount: { type: "integer" },
+    },
+  },
+  Bootstrap: {
+    type: "object",
+    properties: {
+      session: { type: "object", additionalProperties: true },
+      state: { type: "object", additionalProperties: true },
+      modes: { type: "object", additionalProperties: true },
+      approvals: { type: "array", items: { type: "object", additionalProperties: true } },
+      commands: { type: "object", additionalProperties: true },
+      events: {
+        type: "object",
+        properties: { latestSeq: { type: "integer" }, sse: { type: "string" }, replay: { type: "string" } },
+      },
+    },
+  },
+  SessionStatus: {
+    type: "object",
+    properties: {
+      sessionId: { type: "string" },
+      status: { type: "string", enum: ["idle", "streaming"] },
+      model: { type: "object", nullable: true },
+      thinkingLevel: { type: "string", nullable: true },
+      pendingApprovals: { type: "integer" },
+      queueCount: { type: "integer" },
+      latestSeq: { type: "integer" },
+    },
+  },
+  EventStream: {
+    description: "text/event-stream；每帧 id=会话内序号 event=类型 data=单行 JSON",
+    type: "string",
+  },
+  EventReplay: {
+    type: "object",
+    properties: {
+      events: { type: "array", items: { $ref: "#/components/schemas/GatewayEventEnvelope" } },
+      count: { type: "integer" },
+      nextSince: { type: "integer" },
+      latestSeq: { type: "integer" },
+      truncated: { type: "boolean" },
+      bufferLimit: { type: "integer" },
+    },
+  },
+  SessionUsage: {
+    type: "object",
+    properties: {
+      summary: { type: "object", additionalProperties: true },
+      turns: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+  },
+  AgentRoster: {
+    type: "object",
+    properties: {
+      agents: { type: "array", items: { type: "object", additionalProperties: true } },
+      live: { type: "boolean" },
+    },
+  },
+  AgentDefinitions: {
+    type: "object",
+    properties: {
+      total: { type: "integer" },
+      definitions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            description: { type: "string" },
+            advertised: { type: "boolean", description: "是否出现在系统提示词/工具描述里" },
+            tools: { type: "array", items: { type: "string" }, nullable: true },
+            model: { type: "string", nullable: true },
+            thinkingLevel: { type: "string", nullable: true },
+            spawns: { type: "array", items: { type: "string" }, nullable: true },
+            prewalk: { type: "string", nullable: true },
+            advisor: { type: "string", nullable: true },
+          },
+        },
+      },
+    },
+  },
+  ApprovalList: {
+    type: "object",
+    properties: {
+      approvals: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { approvalId: { type: "string" }, tool: { type: "string" }, args: { type: "object" } },
+        },
+      },
+      policy: { type: "object", nullable: true },
+      live: { type: "boolean" },
+    },
+  },
+  Snapshot: {
+    type: "object",
+    properties: {
+      id: { type: "string" },
+      session_id: { type: "string" },
+      kind: { type: "string", enum: ["auto", "manual"] },
+      trigger: { type: "string" },
+      entry_count: { type: "integer" },
+      turn: { type: "integer", nullable: true },
+      created_at: { type: "string" },
+      expires_at: { type: "string", nullable: true },
+    },
+  },
+  SnapshotList: {
+    type: "object",
+    properties: { snapshots: { type: "array", items: { $ref: "#/components/schemas/Snapshot" } } },
+  },
+  ModelCatalog: {
+    type: "object",
+    properties: {
+      total: { type: "integer" },
+      providers: { type: "array", items: { type: "string" } },
+      models: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            provider: { type: "string" },
+            modelId: { type: "string" },
+            name: { type: "string", nullable: true },
+            contextWindow: { type: "integer", nullable: true },
+            maxTokens: { type: "integer", nullable: true },
+            cost: { type: "object", nullable: true },
+          },
+        },
+      },
+    },
+  },
+  ModelPicker: {
+    type: "object",
+    properties: {
+      models: { type: "array", items: { type: "object", additionalProperties: true } },
+      current: { type: "object", nullable: true },
+      thinkingLevels: { type: "array", items: { type: "string" } },
+      live: { type: "boolean" },
+    },
+  },
+  ProviderList: {
+    type: "object",
+    properties: {
+      providers: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            configured: { type: "boolean" },
+            available: { type: "boolean", description: "未禁用且有可解析凭据" },
+            disabled: { type: "boolean" },
+            baseUrl: { type: "string", nullable: true },
+            api: { type: "string", nullable: true },
+            hasApiKey: { type: "boolean", description: "只给是否存在，不给明文" },
+            availableModels: { type: "integer" },
+          },
+        },
+      },
+      disabledProviders: { type: "array", items: { type: "string" } },
+      counts: { type: "object", additionalProperties: { type: "integer" } },
+    },
+  },
+  ModelsConfig: {
+    type: "object",
+    properties: { format: { type: "string" }, config: { type: "object", additionalProperties: true } },
+  },
+  WebhookList: {
+    type: "object",
+    properties: {
+      webhooks: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            url: { type: "string" },
+            events: { type: "array", items: { type: "string" } },
+            sessionId: { type: "string", nullable: true },
+            createdAt: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+  HookList: {
+    type: "object",
+    properties: {
+      hooks: { type: "array", items: { type: "object", additionalProperties: true } },
+      events: { type: "array", items: { type: "string" }, description: "21 个可桥接事件" },
+      decideEvents: { type: "array", items: { type: "string" }, description: "其中支持同步决策的子集" },
+    },
+  },
+  HttpToolList: {
+    type: "object",
+    properties: {
+      tools: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            name: { type: "string" },
+            label: { type: "string" },
+            description: { type: "string" },
+            parameters: { type: "object", description: "JSON Schema" },
+            url: { type: "string" },
+            timeoutMs: { type: "integer" },
+            sessionId: { type: "string", nullable: true },
+          },
+        },
+      },
+      userLevel: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+  },
+  AgentDefinitionList: {
+    type: "object",
+    properties: {
+      agents: { type: "array", items: { type: "object", additionalProperties: true } },
+      dir: { type: "string" },
+      precedence: { type: "string" },
+    },
+  },
+  AgentDefinition: {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      description: { type: "string", nullable: true },
+      tools: { type: "array", items: { type: "string" }, nullable: true },
+      model: { type: "array", items: { type: "string" }, nullable: true },
+      thinkingLevel: { type: "string", nullable: true },
+      spawns: { type: "string", nullable: true },
+      autoloadSkills: { type: "array", items: { type: "string" }, nullable: true },
+      prewalk: { type: "string", nullable: true },
+      advisor: { type: "string", nullable: true },
+      instructions: { type: "string" },
+      frontmatter: { type: "object", additionalProperties: true },
+    },
+  },
+  Limits: {
+    type: "object",
+    properties: {
+      limits: { type: "object", additionalProperties: true },
+      usage: { type: "object", additionalProperties: true },
+      rpmWindow: { type: "object", additionalProperties: true },
+    },
+  },
+  UsageBuckets: {
+    type: "object",
+    properties: {
+      buckets: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            key: { type: "string" },
+            turns: { type: "integer" },
+            inputTokens: { type: "integer" },
+            outputTokens: { type: "integer" },
+            totalTokens: { type: "integer" },
+            costUsd: { type: "number" },
+          },
+        },
+      },
+    },
+  },
+  SkillList: {
+    type: "object",
+    properties: {
+      skills: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            description: { type: "string", nullable: true },
+            scope: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+  PluginList: {
+    type: "object",
+    properties: {
+      plugins: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: { name: { type: "string" }, scope: { type: "string" }, bytes: { type: "integer" } },
+        },
+      },
+    },
+  },
+  ContextFileList: {
+    type: "object",
+    properties: {
+      files: {
+        type: "array",
+        items: { type: "object", properties: { name: { type: "string" }, bytes: { type: "integer" } } },
+      },
+      supported: { type: "array", items: { type: "string" } },
+    },
+  },
+  ConfigSchema: {
+    type: "object",
+    properties: { version: { type: "integer" }, models: { type: "object" }, agents: { type: "object" } },
+  },
+  FileContent: {
+    type: "object",
+    properties: {
+      path: { type: "string" },
+      encoding: { type: "string" },
+      content: { type: "string" },
+      size: { type: "integer" },
+    },
+  },
+  FileTree: {
+    type: "object",
+    properties: {
+      tree: { type: "array", items: { type: "object", additionalProperties: true } },
+      truncated: { type: "boolean" },
+    },
+  },
+  GitStatus: {
+    type: "object",
+    properties: {
+      branch: { type: "string", nullable: true },
+      upstream: { type: "string", nullable: true },
+      ahead: { type: "integer" },
+      behind: { type: "integer" },
+      entries: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+  },
+  GitLog: {
+    type: "object",
+    properties: {
+      commits: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            hash: { type: "string" },
+            author: { type: "string" },
+            date: { type: "string" },
+            subject: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+  GitDiff: { type: "object", properties: { diff: { type: "string" }, truncated: { type: "boolean" } } },
+  JobTree: {
+    type: "object",
+    properties: {
+      tree: { type: "object", nullable: true },
+      snapshot: { type: "object", nullable: true },
+      live: { type: "boolean" },
+    },
+  },
+  AuditPage: {
+    type: "object",
+    properties: {
+      page: { type: "integer" },
+      perPage: { type: "integer" },
+      total: { type: "integer" },
+      entries: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+  },
+  UserSummary: {
+    type: "object",
+    properties: {
+      user_id: { type: "string" },
+      status: { type: "string" },
+      limits: { type: "object", additionalProperties: true },
+      active_sessions: { type: "integer" },
+      live_sessions: { type: "integer" },
+      streaming_sessions: { type: "integer" },
+    },
+  },
+  TrashList: {
+    type: "object",
+    properties: {
+      sessions: { type: "array", items: { type: "object", additionalProperties: true } },
+      tenants: { type: "array", items: { type: "object", additionalProperties: true } },
+    },
+  },
+  BundleManifest: {
+    type: "object",
+    properties: {
+      bundlePath: { type: "string" },
+      manifest: {
+        type: "object",
+        properties: {
+          formatVersion: { type: "integer" },
+          dbSchemaVersion: { type: "integer" },
+          exportedAt: { type: "string" },
+          counts: { type: "object", additionalProperties: { type: "integer" } },
+          files: { type: "array", items: { type: "string" } },
+          sha256: { type: "string" },
+        },
+      },
+    },
+  },
+  ImportResult: {
+    type: "object",
+    properties: {
+      ok: { type: "boolean" },
+      counts: { type: "object", additionalProperties: { type: "integer" } },
+      restoredFrom: { type: "string" },
+      backupDir: { type: "string" },
+      removedFiles: { type: "integer" },
+    },
+  },
+};
+
+/** 标签（按领域细分；ops 单独一组）。 */
+const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
+  { name: "session-core", description: "会话生命周期：创建/列表/详情/归档/删除/分叉/快照" },
+  { name: "session-conversation", description: "对话通道：prompt/steer/inject/业务事件/队列" },
+  { name: "session-observe", description: "状态与观测：state/bootstrap/status/事件流与回放/用量" },
+  { name: "session-panel", description: "控制台面板：命令/模型/思考/todo/上下文/模式/维护" },
+  { name: "session-agent", description: "Agent Hub：名册/定义/transcript/chat/kill/revive" },
+  { name: "session-workspace", description: "会话工作区：文件读写/上传/git/worktree" },
+  { name: "session-tools", description: "会话工具面：运行时工具集/工具发现/MCP/LSP/异步任务" },
+  { name: "config-models", description: "用户级模型配置：目录/models.yml/provider/凭据/角色/探针" },
+  { name: "config-automation", description: "用户级自动化：审批策略与授权/钩子/回调/业务工具/上下文文件" },
+  { name: "config-discovery", description: "用户级发现项与用量：skills/plugins/MCP 开关/限额/用量/schema" },
+  { name: "internal", description: "内部生命周期契约（/internal/*）：上游服务专用，分享令牌拒绝" },
+  { name: "admin", description: "全局资源管理（/admin/*）：需上游注入 X-Admin-Id" },
+  { name: "ops", description: "运维探针（healthz/readyz/metrics/openapi），内网无凭据" },
 ];
 
+/** 路径 → 标签。 */
 function tagFor(p: string): string {
   if (p.startsWith("/admin")) return "admin";
   if (p.startsWith("/internal")) return "internal";
-  if (p.startsWith("/api/me")) return "api-config";
-  if (p.startsWith("/api")) return "api-session";
-  return "ops";
-}
-
-const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
-  { name: "api-session", description: "会话能力面（/api/sessions/*）：对话、状态、快照、Agent Hub、文件与 git" },
-  { name: "api-config", description: "用户级配置面（/api/me/*）：模型/审批/回调/钩子/HTTP 工具/上下文文件" },
-  { name: "internal", description: "内部生命周期契约（/internal/*）：上游服务专用，分享令牌拒绝" },
-  { name: "admin", description: "全局资源管理（/admin/*）：需上游注入 X-Admin-Id" },
-  { name: "ops", description: "运维探针（healthz/readyz/metrics），内网无凭据" },
-];
-
-/** longest-prefix 族摘要；未命中返回 null（保持旧式 METHOD path）。 */
-function familySummary(p: string): string | null {
-  let best: string | null = null;
-  for (const [prefix, summary] of FAMILY_SUMMARY) {
-    if ((p === prefix || p.startsWith(`${prefix}/`)) && (best === null || prefix.length > (best?.length ?? 0))) {
-      const candidate = FAMILY_SUMMARY.find(([pre]) => pre === prefix);
-      if (candidate && (best === null || prefix.length > best.length)) best = prefix;
-      void summary;
-    }
+  if (p === "/healthz" || p === "/readyz" || p === "/metrics" || p === "/openapi.json") return "ops";
+  if (p.startsWith("/api/me")) {
+    if (/^\/api\/me\/(models|providers|model-roles)/.test(p)) return "config-models";
+    if (/^\/api\/me\/(approval|hooks|webhooks|tools|context-files|agents)/.test(p)) return "config-automation";
+    return "config-discovery";
   }
-  if (!best) return null;
-  return FAMILY_SUMMARY.find(([pre]) => pre === best)![1];
+  if (/\/agents(\/|$)/.test(p)) return "session-agent";
+  if (/\/git(\/|$)|\/file|\/files|\/tree/.test(p)) return "session-workspace";
+  if (/\/mcp|\/lsp|\/tools|\/jobs/.test(p)) return "session-tools";
+  if (/\/(commands|models|thinking|todos|context|modes|plan|maintenance|session-tree|skills)/.test(p))
+    return "session-panel";
+  if (/\/(state|bootstrap|status|events|usage|stats|messages|dump|integration)/.test(p)) return "session-observe";
+  if (
+    /\/(prompt|steer|inject|business-events|follow-up|abort|queue|interrupt|title|name|cycle|reset|handoff|compact|fresh|export|model|branch|fork|restore-interrupted|messages\/custom)/.test(
+      p,
+    )
+  )
+    return "session-conversation";
+  return "session-core";
 }
 
-/** 组装单个操作的 OpenAPI 条目。 */
+/**
+ * 组装单个操作的 OpenAPI 条目：摘要 / 参数 / 请求体 / 响应全部查表。
+ * 查不到摘要说明该路由没在 SUMMARIES 登记——由合约测试守住覆盖率 100%。
+ */
 function operationFor(method: string, p: string, rawPath: string): Record<string, unknown> {
-  const doc = ROUTE_DOCS[`${method.toUpperCase()} ${p}`];
-  const params = [...rawPath.matchAll(/:([A-Za-z0-9_]+)/g)].map((m) => ({
+  const key = `${method.toUpperCase()} ${p}`;
+  const params: unknown[] = [...rawPath.matchAll(/:([A-Za-z0-9_]+)/g)].map((m) => ({
     name: m[1],
     in: "path",
     required: true,
     schema: { type: "string" },
   }));
+  for (const q of QUERIES[key] ?? []) {
+    params.push({
+      name: q.name,
+      in: "query",
+      required: false,
+      schema: q.schema ?? { type: "string" },
+      description: q.description,
+    });
+  }
+
+  const responses: Record<string, unknown> = {
+    "401": { description: "认证失败", content: { "application/json": { schema: ERROR_SCHEMA_REF } } },
+  };
+  for (const code of ERRORS[key] ?? []) {
+    const [status, ...rest] = code.split(" ");
+    responses[status] = {
+      description: rest.join(" "),
+      content: { "application/json": { schema: ERROR_SCHEMA_REF } },
+    };
+  }
+  // 200 响应模型：登记过的指向 components.schemas，其余给通用对象
+  const responseSchema = RESPONSES[key];
+  responses["200"] = responseSchema
+    ? {
+        description: "OK",
+        content: { "application/json": { schema: { $ref: `#/components/schemas/${responseSchema}` } } },
+      }
+    : { description: "OK", content: { "application/json": { schema: { type: "object" } } } };
 
   const op: Record<string, unknown> = {
     tags: [tagFor(p)],
-    summary: doc?.summary ?? familySummary(p) ?? `${method.toUpperCase()} ${p}`,
+    summary: SUMMARIES[key] ?? `${method.toUpperCase()} ${p}`,
     parameters: params,
-    responses: { ...baseResponses(), ...(doc?.errors ? errorResponses(doc.errors) : {}) },
+    responses,
   };
 
-  // 请求体（ROUTE_DOCS 声明了 body 才写 requestBody）
-  if (doc?.body) {
-    const inline = (BODY as Record<string, unknown>)[doc.body.type];
-    if (inline) {
+  // 请求体
+  const bodyType = BODIES[key];
+  if (bodyType) {
+    if (bodyType === "importSession") {
       op.requestBody = {
         required: true,
-        content: { "application/json": { schema: inline } },
+        content: { "text/plain": { schema: { type: "string", description: "会话 JSONL 原文（NDJSON，≤20MB）" } } },
       };
-    } else if (doc.body.type === "string") {
-      // 原文通道（JSONL 导入 / YAML / Markdown）
-      op.requestBody = { required: true, content: { "text/plain": { schema: { type: "string" } } } };
     } else {
-      // 无预置 schema 的 JSON 体：给通用对象 + 语义描述
       op.requestBody = {
         required: true,
-        content: { "application/json": { schema: { type: "object", description: doc.body.description } } },
+        content: { "application/json": { schema: (BODY as Record<string, unknown>)[bodyType] ?? { type: "object" } } },
       };
     }
   }
 
   // 幂等语义（DESIGN §7）
   if (method.toUpperCase() === "POST" && (p === "/api/sessions" || p === "/api/sessions/{sid}/snapshots")) {
-    op.parameters = [
-      ...(op.parameters as unknown[]),
-      {
-        name: "Idempotency-Key",
-        in: "header",
-        schema: { type: "string" },
-        description: "24h 窗口内同 user+scope 重放同响应（仅缓存 2xx）",
-      },
-    ];
-    (op.responses as Record<string, unknown>)["200"] = {
-      description: "Idempotency-Replayed: true（命中重放）",
-      content: { "application/json": { schema: { type: "object" } } },
-    };
+    params.push({
+      name: "Idempotency-Key",
+      in: "header",
+      schema: { type: "string" },
+      description: "24h 窗口内同 user+scope 重放同响应（仅缓存 2xx）",
+    });
   }
   return op;
 }
@@ -692,11 +1403,15 @@ function operationFor(method: string, p: string, rawPath: string): Record<string
 export function buildOpenApi(app: Hono): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {};
   const routes = (app as unknown as { routes: Array<{ method: string; path: string }> }).routes ?? [];
+  let opCount = 0;
+  let documentedCount = 0;
   for (const route of routes) {
     if (route.method === "ALL") continue;
     const raw = route.path.startsWith("/") ? route.path : `/${route.path}`;
     const p = raw.replace(/:([A-Za-z0-9_]+)/g, "{$1}"); // Hono :uid → OpenAPI {uid}
     paths[p] ??= {};
+    opCount++;
+    if (SUMMARIES[`${route.method.toUpperCase()} ${p}`]) documentedCount++;
     paths[p][route.method.toLowerCase()] = operationFor(route.method, p, raw);
   }
   return {
@@ -746,6 +1461,7 @@ export function buildOpenApi(app: Hono): Record<string, unknown> {
             },
           },
         },
+        ...RESPONSE_SCHEMAS,
       },
     },
     "x-gateway-events": {
@@ -755,6 +1471,15 @@ export function buildOpenApi(app: Hono): Record<string, unknown> {
       reconnect: "Last-Event-ID 回放（仅消息/工具类）+ replay.state 状态帧；先订阅后 prompt",
     },
     "x-gateway-error-codes": GATEWAY_ERROR_CODES,
+    "x-gateway-coverage": {
+      operations: opCount,
+      documented: documentedCount,
+      /** 摘要覆盖率（1 = 全部操作都有操作级描述） */
+      summaryCoverage: opCount > 0 ? documentedCount / opCount : 1,
+      queryParams: Object.keys(QUERIES).length,
+      responseModels: Object.keys(RESPONSE_SCHEMAS).length,
+      tags: TAG_DESCRIPTIONS.map((t) => t.name),
+    },
     "x-headers": {
       "X-User-Id": "上游注入的用户标识（svc-token 必带）",
       "X-Request-Id": "全链路透传，缺失生成",

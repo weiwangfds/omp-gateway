@@ -2,6 +2,7 @@
 
 面向部署与接入方：怎么把网关跑起来、怎么接、怎么运维、怎么迁移。
 设计语义与取舍见 [`DESIGN.md`](./DESIGN.md)；机器可读契约见运行时 `GET /openapi.json`；
+端点清单见 [`endpoint-index.md`](./endpoint-index.md)（由 openapi 派生）；
 事件类型见 [`../contracts/gateway-events.v1.schema.json`](../contracts/gateway-events.v1.schema.json)；
 错误码见 [`../contracts/error-codes.md`](../contracts/error-codes.md)；
 集成端调用细节见 [`../contracts/integration-guide.md`](../contracts/integration-guide.md)。
@@ -195,8 +196,7 @@ drain 只拒新会话并让健康检查失败；**已有会话继续跑完**。�
 | prompt 429 `STREAM_QUEUE_TIMEOUT` | 流式槽位排队超时 | 按 `Retry-After` 退避；调大 `GATEWAY_MAX_GLOBAL_STREAMING` |
 | 建会话 429 `RATE_LIMITED` | RPM 超限 | 退避；或调 `limits.rpm` |
 | 建会话 402 `BUDGET_EXCEEDED` | 月度预算耗尽 | 上游调 `PATCH /internal/users/:uid/limits` 的 `monthlyBudgetUsd` |
-| 工具调用挂住等审批 | 审批策略为 always-ask 且未决策 | SSE `tool.confirm_required` → `POST /:sid/approvals/:id {"approve":true}`；超时后端自动拒绝 |
-| 事件不来了 | 未先订阅 SSE | 先 `GET /:sid/events` 建立订阅再 `POST /:sid/prompt`（协议要求） |
+| 工具调用挂住等审批 | 审批策略为 always-ask 且未决策 | SSE `tool.confirm_required` → `POST /:sid/approvals/:id {"approve":true}`；超时后端自动拒绝 || 事件不来了 | 未先订阅 SSE | 先 `GET /:sid/events` 建立订阅再 `POST /:sid/prompt`（协议要求） |
 | 404 `NOT_FOUND` 查不到会话 | 跨租户或已删除 | 网关不区分"不存在"与"无权访问"（防枚举） |
 | MCP 工具不出现 | `enableMcp=false` 或 `mcp.json` 未合成 | `POST /:sid/mcp/reload`；检查 `GET /api/me/mcp` |
 
@@ -298,18 +298,129 @@ bun run test          # 串行全量（Bun 默认并行会争抢端口）
 发布检查表：
 
 1. `bun run lint` 与 `bun run typecheck` 零诊断；
-2. `bun run test` 全绿（28 个文件，约 295 项）；
+2. `bun run test` 全绿（28 个文件，约 296 项）；
 3. 契约变更同步 `contracts/`（事件 schema、错误码）与 `docs/DESIGN.md`；
-4. `GET /openapi.json` 的操作数与摘要覆盖由 `test/detailed-endpoints.test.ts` 守住；
-5. 容器化验证：`docker build` + `scripts/docker-smoke.mjs`（15 项，含导出导入往返）。
+4. 新增/改动路由后跑 `bun run scripts/gen-endpoint-index.mjs` 重新生成端点索引；
+5. `GET /openapi.json` 的摘要覆盖率必须 100%（`x-gateway-coverage.summaryCoverage`），
+   由 `test/detailed-endpoints.test.ts` 守住；
+6. 容器化验证：`docker build` + `scripts/docker-smoke.mjs`（15 项，含导出导入往返）。
 
-## 8. 参考
+## 8. 任务手册
+
+按“要做什么”查步骤。每条都是可直接执行的命令序列。
+
+### 8.1 让一个新用户能用上模型
+
+```bash
+# 1) provision（建目录骨架 + 租户行，幂等）
+curl -X POST $BASE/internal/users/u_42/provision -H "Authorization: Bearer $TOKEN" -H "X-User-Id: ops"
+
+# 2) 配置模型目录（结构化 JSON；网关会格式化落盘）
+curl -X PUT $BASE/api/me/models/config -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{
+    "providers": { "minimax": {
+      "baseUrl": "https://api.minimax.cn/v1", "api": "openai-completions",
+      "models": [{ "id": "MiniMax-M3.1-Flash", "name": "MiniMax M3.1 Flash" }] } } }'
+
+# 3) 注入凭据（值可以是环境变量名，也可以是字面量）
+curl -X POST $BASE/api/me/models/credentials -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{"provider":"minimax","apiKey":"MINIMAX_API_KEY"}'
+
+# 4) 验证：目录里应出现该模型
+curl "$BASE/api/me/models" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" | jq '.models[].modelId'
+
+# 5) 可选：探针实测一次（独立内存会话，测首字延迟）
+curl -X POST $BASE/api/me/models/test -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{"provider":"minimax","modelId":"MiniMax-M3.1-Flash"}'
+```
+
+### 8.2 让业务系统接管一次对话（集成端最小闭环）
+
+```bash
+# 1) 建会话（带业务上下文文件；不落盘，只进系统提示词）
+SID=$(curl -s -X POST $BASE/api/sessions -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{
+    "model": {"provider":"minimax","modelId":"MiniMax-M3.1-Flash"},
+    "contextFiles": [{"path":"AGENTS.md","content":"你是订单助手"}] }' | jq -r .id)
+
+# 2) 订阅事件（先订阅后 prompt，否则会丢开头事件）
+curl -N "$BASE/api/sessions/$SID/events" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" &
+
+# 3) 发指令（202 立即返回；结果在 SSE 里）
+curl -X POST "$BASE/api/sessions/$SID/prompt" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{"text":"查一下订单 12345"}'
+
+# 4) 无 SSE 能力的集成端：加 wait=true 同步等终态
+curl -X POST "$BASE/api/sessions/$SID/prompt" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{"text":"查一下订单 12345","wait":true,"waitTimeoutMs":120000}'
+```
+
+### 8.3 把业务函数暴露成 agent 工具
+
+```bash
+# 1) 注册（JSON Schema 描述入参；网关在模型调用时 POST 你的端点）
+curl -X PUT $BASE/api/me/tools/http/order_status -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{
+    "description": "查询订单状态",
+    "url": "https://biz.internal/tools/order_status",
+    "parameters": {"type":"object","properties":{"orderId":{"type":"string"}},"required":["orderId"]},
+    "timeoutMs": 10000 }'
+
+# 2) 业务端点实现约定
+#    请求：POST {"toolCallId","name","args","sessionId","userId"}
+#    响应：{"text":"..."} 或 {"content":[{"type":"text","text":"..."}]}
+#    校验：x-omp-signature = HMAC-SHA256(secret, 原始 body)
+
+# 3) 热生效：注册后当前 live 会话立即可用（refreshMCPTools），新会话自动注入
+```
+
+### 8.4 在决策点拦截 agent（同步决策钩子）
+
+```bash
+# 注册 decide 型钩子：tool_call 事件，网关等你的响应决定放行/改参/拦截
+curl -X POST $BASE/api/sessions/$SID/hooks -H "Authorization: Bearer $TOKEN" -H "X-User-Id: u_42" \
+  -H 'Content-Type: application/json' -d '{
+    "event": "tool_call", "mode": "decide",
+    "url": "https://biz.internal/hooks/tool_call",
+    "timeoutMs": 3000, "onTimeout": "deny",
+    "matcher": {"tool": "bash"} }'
+
+# 你的响应体（语义对齐 omp hooks）：
+#   {"block": true, "reason": "不允许写生产配置"}
+#   {"input": {"command": "ls"}}          # 改参
+#   {"additionalContext": "用 dry-run"}   # 追加上下文
+```
+
+### 8.5 审计与合规
+
+```bash
+# 某用户的所有变更动作
+curl "$BASE/internal/audit?user=u_42&per_page=200" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: ops"
+
+# 某类动作（如删除）
+curl "$BASE/internal/audit?action=session.delete" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: ops"
+```
+
+### 8.6 扩容一个用户
+
+```bash
+# 提高该用户的会话数与并发数（合并语义，不影响其他字段）
+curl -X PATCH $BASE/internal/users/u_42/limits -H "Authorization: Bearer $TOKEN" -H "X-User-Id: ops" \
+  -H 'Content-Type: application/json' -d '{"maxSessions":100,"maxConcurrent":20}'
+
+# 只放开某个 provider
+curl -X PATCH $BASE/internal/users/u_42/limits -H "Authorization: Bearer $TOKEN" -H "X-User-Id: ops" \
+  -H 'Content-Type: application/json' -d '{"allowedProviders":["minimax","anthropic"]}'
+```
+
+## 9. 参考
 
 | 主题 | 文档 |
 |---|---|
 | 完整设计与取舍 | [`DESIGN.md`](./DESIGN.md) |
+| 端点清单（193 个操作，含查询参数） | [`endpoint-index.md`](./endpoint-index.md) |
 | 集成端调用细节（python/go/ts） | [`../contracts/integration-guide.md`](../contracts/integration-guide.md) |
 | 事件契约 | [`../contracts/gateway-events.v1.schema.json`](../contracts/gateway-events.v1.schema.json) |
 | 前端事件映射 | [`../contracts/frontend-mapping.md`](../contracts/frontend-mapping.md) |
 | 错误码表 | [`../contracts/error-codes.md`](../contracts/error-codes.md) |
-| 运行时契约 | `GET /openapi.json` |
+| 运行时契约 | `GET /openapi.json`（OpenAPI 3.1，含 `x-gateway-coverage` 覆盖率自省） |

@@ -80,22 +80,38 @@ describe("逐端点详测：ops + openapi", () => {
         expect(`${me.toUpperCase()} ${p}: ${s}`).not.toBe(`${me.toUpperCase()} ${p}: ${me.toUpperCase()} ${p}`);
         expect(s.length).toBeGreaterThanOrEqual(4);
         expect(op.responses["401"]).toBeTruthy(); // 统一错误面
+        expect(op.tags?.length).toBeTruthy(); // 每个操作归属一个标签
       }
     }
-    // components：Error 信封 + 事件信封
+    // 覆盖率自省：摘要覆盖率必须 100%（新增路由未登记摘要会立刻掉下来）
+    const cov = spec["x-gateway-coverage"];
+    expect(cov.summaryCoverage).toBe(1);
+    expect(cov.documented).toBe(cov.operations);
+    expect(cov.operations).toBeGreaterThanOrEqual(190);
+    expect(cov.responseModels).toBeGreaterThanOrEqual(40);
+    expect(cov.tags.length).toBeGreaterThanOrEqual(12);
+    // components：Error 信封 + 事件信封 + 响应模型
     expect(spec.components.schemas.Error.properties.error.properties.code).toBeTruthy();
     expect(spec.components.schemas.GatewayEventEnvelope.properties.type.enum.length).toBeGreaterThanOrEqual(28);
+    expect(spec.components.schemas.Session.properties.id).toBeTruthy();
+    expect(spec.components.schemas.EventReplay.properties.nextSince).toBeTruthy();
     // 错误码契约投影
-    expect(spec["x-gateway-error-codes"]["STREAM_QUEUE_TIMEOUT"]).toBeString();
-    expect(spec["x-gateway-error-codes"]["BUNDLE_INCOMPLETE"]).toBeString();
+    expect(spec["x-gateway-error-codes"].STREAM_QUEUE_TIMEOUT).toBeString();
+    expect(spec["x-gateway-error-codes"].BUNDLE_INCOMPLETE).toBeString();
     // 幂等操作带 Idempotency-Key 头文档
     const create = spec.paths["/api/sessions"].post;
     expect(create.parameters.some((x: any) => x.name === "Idempotency-Key")).toBeTrue();
-    // 高频操作带请求体与专属错误码
+    // 高频操作带请求体、查询参数与专属错误码
     const prompt = spec.paths["/api/sessions/{sid}/prompt"].post;
     expect(prompt.requestBody.content["application/json"].schema.properties.text).toBeTruthy();
     expect(prompt.responses["409"]).toBeTruthy();
     expect(prompt.responses["429"]).toBeTruthy();
+    // 查询参数已声明（否则集成端只能靠试）
+    const list = spec.paths["/api/sessions"].get;
+    expect(list.parameters.some((x: any) => x.name === "page")).toBeTrue();
+    expect(list.parameters.some((x: any) => x.name === "status")).toBeTrue();
+    const events = spec.paths["/api/sessions/{sid}/events"].get;
+    expect(events.parameters.some((x: any) => x.name === "types")).toBeTrue();
   });
 
   test("healthz/readyz：数据根只读故障 → readyz 503", async () => {

@@ -13,9 +13,10 @@ omp gateway（本仓库：Bun + Hono + omp SDK）
 ```
 
 - 设计与全部语义：[`docs/DESIGN.md`](docs/DESIGN.md)（§1 定位 / §5 快照 / §6 事件契约 / §18 管理权限）
-- **运维手册（SOP）**：[`docs/SOP.md`](docs/SOP.md)（部署 / 接入 / 日常运维 / 故障速查 / 环境迁移 / 发布检查表）
-- 机器可读契约：运行时 `GET /openapi.json`（193 个操作，含摘要、请求体、错误码）；事件：[`contracts/gateway-events.v1.schema.json`](contracts/gateway-events.v1.schema.json)
-- 测试：`cd gateway && bun run test`（28 个文件串行，约 295 项：离线全量 + 真实模型 e2e 自动跳过/执行）
+- **运维手册（SOP）**：[`docs/SOP.md`](docs/SOP.md)（部署 / 接入 / 日常运维 / 故障速查 / 环境迁移 / 任务手册 / 发布检查表）
+- **端点索引**：[`docs/endpoint-index.md`](docs/endpoint-index.md)（193 个操作，按 13 个领域分组，含查询参数；由 openapi 派生）
+- 机器可读契约：运行时 `GET /openapi.json`（OpenAPI 3.1：操作级摘要 + 请求体 + 错误码 + 43 个响应模型 + `x-gateway-coverage` 覆盖率自省）；事件：[`contracts/gateway-events.v1.schema.json`](contracts/gateway-events.v1.schema.json)
+- 测试：`cd gateway && bun run test`（28 个文件串行，约 296 项：离线全量 + 真实模型 e2e 自动跳过/执行）
 
 ## 快速上手
 
@@ -119,6 +120,7 @@ gateway/          # 网关（本 README 的主体）
   Dockerfile      # Bun + Node/npm + Conda 三运行时；工作区根目录挂载点 /workspace
 contracts/        # 事件契约 schema + 前端映射契约 + 集成指南 + 错误码
 docs/DESIGN.md    # 设计定稿（33 节；§31 结构拆分 / §32 环境迁移）
-docs/SOP.md       # 运维手册（部署 / 接入 / 运维 / 迁移 / 排障）
+docs/SOP.md       # 运维手册（部署 / 接入 / 运维 / 迁移 / 排障 / 任务手册）
+docs/endpoint-index.md # 端点索引（193 个操作，由 openapi 派生）
 docker-compose.yml# 工作区根目录挂载 + 限额与备份参数
 ```
