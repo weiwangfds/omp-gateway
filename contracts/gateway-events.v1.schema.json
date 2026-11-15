@@ -1,0 +1,750 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gateway.local/contracts/gateway-events.v1.schema.json",
+  "title": "gateway-events v1（omp 网关 SSE 事件信封）",
+  "description": "网关把 omp AgentSessionEvent 规范化后的稳定事件契约。传输：GET /api/sessions/:sid/events (SSE)；event 行 = type，data 行 = 本 schema 实例，id 行 = seq（Last-Event-ID 重连）。语义：断开=仅解绑订阅；停止=显式 POST abort；重连=Last-Event-ID+replay.state 状态帧；先订阅后 prompt（DESIGN §6）。",
+  "type": "object",
+  "required": [
+    "type",
+    "seq",
+    "ts"
+  ],
+  "properties": {
+    "type": {
+      "enum": [
+        "session.status",
+        "session.status_changed",
+        "replay.state",
+        "message.started",
+        "message.completed",
+        "text.delta",
+        "tool.started",
+        "tool.completed",
+        "tool.confirm_required",
+        "turn.completed",
+        "model.changed",
+        "thinking.changed",
+        "agents.changed",
+        "notice",
+        "omp.raw",
+        "todo.reminder",
+        "todo.cleared",
+        "goal.updated",
+        "queue.updated",
+        "compaction.started",
+        "compaction.completed",
+        "retry.started",
+        "retry.completed",
+        "model.fallback",
+        "config.warnings",
+        "rules.triggered",
+        "business.event",
+        "business.completed"
+      ]
+    },
+    "seq": {
+      "type": "integer",
+      "description": "会话级单调序号（SSE id:）"
+    },
+    "ts": {
+      "type": "integer",
+      "description": "epoch ms"
+    },
+    "correlation": {
+      "type": "object",
+      "description": "业务事件关联（DESIGN §22.5）：该事件属于某个被注入业务事件的响应链",
+      "properties": {
+        "eventId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eventId",
+        "type"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "session.status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "status": {
+            "enum": [
+              "idle",
+              "streaming"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "session.status_changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "text.delta"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "messageId": {
+            "type": "string"
+          },
+          "delta": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "messageId",
+          "delta"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "messageId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "messageId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "messageId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "stopReason": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "role",
+          "messageId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "callId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "args": {
+            "description": "工具调用入参（M9 增补，a2ui/前端卡片渲染用）；未知为 null"
+          }
+        },
+        "required": [
+          "callId",
+          "name"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "callId": {
+            "type": "string"
+          },
+          "result": {}
+        },
+        "required": [
+          "callId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "turn.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "isTerminal": {
+            "type": "boolean"
+          },
+          "usage": {
+            "type": "object",
+            "description": "input/output/cacheRead/cacheWrite/totalTokens/cost{...}，来自 turn_end"
+          }
+        },
+        "required": [
+          "isTerminal"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "model.changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "modelId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "thinking.changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "agents.changed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "description": "AgentRef[] 快照（Agent Hub 名册）"
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "notice"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "level": {
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "text"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "omp.raw"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "omp": {
+            "description": "未映射的 omp 原始事件（排障用，勿依赖）"
+          }
+        },
+        "required": [
+          "omp"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "tool.confirm_required"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "approvalId": {
+            "type": "string",
+            "description": "审批请求 id（POST /api/sessions/:sid/approvals/:approvalId 用）"
+          },
+          "tool": {
+            "type": "string",
+            "description": "请求方 kind（tool-approval / ui-confirm）；真实工具名在 args.full 审批文本首部（SDK approvalHeader）"
+          },
+          "args": {
+            "description": "审批载荷 {full, compact}（ExtensionApprovalPrompt）"
+          },
+          "timeoutSec": {
+            "type": "integer",
+            "description": "审批超时秒数，超时自动拒绝"
+          }
+        },
+        "required": [
+          "approvalId",
+          "tool",
+          "args",
+          "timeoutSec"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "todo.reminder"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "todos": {
+            "description": "TodoItem[] 快照（SDK todo 工具形状）"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "maxAttempts": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "todos",
+          "attempt",
+          "maxAttempts"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "todo.cleared"
+          }
+        }
+      },
+      "then": {
+        "properties": {}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "goal.updated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "goal": {
+            "description": "Goal | null"
+          },
+          "state": {
+            "description": "GoalModeState（可选）"
+          }
+        },
+        "required": [
+          "goal"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "queue.updated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "steering": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "followUp": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "liveSteered": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "steering",
+          "followUp",
+          "liveSteered"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "compaction.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "manual": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "manual"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "compaction.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "manual": {
+            "type": "boolean"
+          },
+          "aborted": {
+            "type": "boolean"
+          },
+          "willRetry": {
+            "type": "boolean"
+          },
+          "skipped": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "manual",
+          "aborted"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "retry.started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "attempt": {
+            "type": "integer"
+          },
+          "maxAttempts": {
+            "type": "integer"
+          },
+          "delayMs": {
+            "type": "integer"
+          },
+          "errorMessage": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "maxAttempts",
+          "delayMs",
+          "errorMessage"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "retry.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "finalError": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "attempt"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "model.fallback"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "succeeded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "role"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "config.warnings"
+          }
+        }
+      },
+      "then": {
+        "properties": {}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "rules.triggered"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "rules": {
+            "description": "Rule[]（ttsr 触发的规则快照）"
+          }
+        },
+        "required": [
+          "rules"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "business.event"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "eventId": {
+            "type": "string",
+            "description": "业务事件 id（集成端 correlate 用）"
+          },
+          "eventType": {
+            "type": "string",
+            "description": "业务事件类型（集成端自定义，如 customer.updated）"
+          },
+          "data": {
+            "description": "结构化负载（原样透传）"
+          },
+          "text": {
+            "type": "string",
+            "description": "注入给 agent 的自然语言文本"
+          }
+        },
+        "required": [
+          "eventId",
+          "eventType",
+          "text"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "business.completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "eventType": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed"
+            ]
+          },
+          "usage": {
+            "description": "该 turn 的用量（与 turn.completed 同源）"
+          }
+        },
+        "required": [
+          "eventId",
+          "eventType",
+          "status"
+        ]
+      }
+    }
+  ]
+}

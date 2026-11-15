@@ -1,0 +1,52 @@
+# omp 网关本地编排
+#
+# 工作区根目录由宿主机挂载进容器（WORKSPACE_ROOT → /workspace）：
+# 会话 workspace、网关状态（gateway.db）与迁移 bundle 全部落在这个卷里，
+# 宿主机可直接读写，换机时整目录搬移即可（DESIGN §32）。
+#
+# 用法：
+#   WORKSPACE_ROOT=/srv/omp-workspace docker compose up -d
+#   docker compose logs -f gateway
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: omp-gateway:latest
+    container_name: omp-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8787}:8787"
+    environment:
+      # 上游注入的服务 token（必填；上游与网关共用同一份）
+      GATEWAY_SERVICE_TOKENS: "${GATEWAY_SERVICE_TOKENS:?set GATEWAY_SERVICE_TOKENS in .env}"
+      # 数据根落在挂载卷内 → 状态随卷走，容器重建不丢
+      GATEWAY_DATA_ROOT: /workspace/.omp-gateway
+      GATEWAY_EXPORT_DIR: /workspace/.omp-gateway/exports
+      GATEWAY_IMPORT_DIRS: /workspace/.omp-gateway/exports
+      # 限额（每用户并发会话数 / 全局流式槽位）
+      GATEWAY_DEFAULT_MAX_CONCURRENT: "${GATEWAY_DEFAULT_MAX_CONCURRENT:-10}"
+      GATEWAY_DEFAULT_MAX_SESSIONS: "${GATEWAY_DEFAULT_MAX_SESSIONS:-50}"
+      GATEWAY_MAX_GLOBAL_STREAMING: "${GATEWAY_MAX_GLOBAL_STREAMING:-50}"
+      # 回调目标白名单（SSRF 收紧；留空=内网放行）
+      GATEWAY_WEBHOOK_HOSTS_ALLOWLIST: "${GATEWAY_WEBHOOK_HOSTS_ALLOWLIST:-}"
+      # 定时备份目录（VACUUM INTO 一致快照）
+      GATEWAY_BACKUP_DIR: /workspace/.omp-gateway/backups
+      GATEWAY_BACKUP_INTERVAL_MIN: "${GATEWAY_BACKUP_INTERVAL_MIN:-60}"
+    volumes:
+      # 工作区根目录对外挂载：宿主机可见、可直接编辑会话产出
+      - "${WORKSPACE_ROOT:-./workspace}:/workspace"
+      # conda 环境（网关与 MCP server 共用；如需固定版本可改为具名卷）
+      # - omp-conda:/opt/conda/envs/omp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s # 让优雅关停跑完（dispose live 会话）
+
+# volumes:
+#   omp-conda:
+#     name: omp-conda
