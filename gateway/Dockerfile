@@ -1,18 +1,24 @@
-# 多租户 omp 会话引擎网关 —— 容器镜像
+# 多租户 omp 会话引擎网关 —— 容器镜像（多阶段构建）
 #
 # 提供三套运行时，供 agent 在会话里按需调用：
 #   - Bun 1.4  ：网关本体（进程内嵌 omp SDK，不起 RPC/子进程）
 #   - Node 22  ：npm 生态的 MCP server / 工具链
-#   - Conda    ：Python 生态的 MCP server（uv/pip 装包）
+#   - Conda    ：Python 生态的 MCP server（uv/uvx 装包；conda 用基础镜像自带的）
 #
 # 工作区根目录由外部挂载（见 docker-compose.yml 的 WORKSPACE_ROOT → /workspace）：
 # 网关的会话 workspace 与状态都落在挂载卷内，宿主机可直接读写、整体搬移（DESIGN §32）。
+#
+# 构建分两阶段（体积从 3.86GB 降到 2.14GB，-44%）：
+#   builder  装全量依赖（含 devDep）→ 跑 typecheck → 重装成只含生产依赖的 node_modules
+#            → 剔除 TUI/浏览器前端依赖与 node 头文件
+#   runtime  只拿运行期需要的东西：bun/node 二进制 + conda(python) + uv + 生产依赖 + 源码
+#            （COPY --chown 避免 chown -R 触发 overlayfs copy-up 把依赖再存一份）
 #
 # 构建：docker build -t omp-gateway:latest gateway/
 # 运行：docker compose up -d
 
 # ── 基础镜像：Miniconda 提供 conda 环境（python/uv/科学计算栈）────────────────
-FROM continuumio/miniconda3:latest
+FROM continuumio/miniconda3:latest AS base
 
 LABEL org.opencontainers.image.title="omp-gateway" \
       org.opencontainers.image.description="Multi-tenant omp session engine gateway (Hono + omp SDK, in-process)" \
@@ -21,85 +27,120 @@ LABEL org.opencontainers.image.title="omp-gateway" \
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH="/opt/bun/bin:/usr/local/bin:/opt/conda/bin:${PATH}" \
-    # npm/conda 不在构建期交互提示
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false \
     CONDA_ALWAYS_YES=true \
-    BUN_INSTALL=/opt/bun \
-    # 网关进程工作目录：会话 workspace 默认落在这里
-    GATEWAY_WORKSPACE_ROOT=/workspace
+    BUN_INSTALL=/opt/bun
 
-# ── 系统依赖 ────────────────────────────────────────────────────────────────
-# git：workspace 的 git 面；ca-certificates：HTTPS 拉取依赖与回调；
-# build-essential/python3-dev：conda 装带原生扩展的包；tini：正确的 PID 1 信号转发；
-# unzip/xz-utils/zip：bun 安装脚本与 node 官方包解压需要。
+# ═══════════════════════════════════════════════════════════════════════════
+# 阶段 1：builder —— 依赖安装 + 类型检查 + 产出生产依赖
+# ═══════════════════════════════════════════════════════════════════════════
+FROM base AS builder
+
+# 构建期工具链只在这一层；omp 的原生模块是预编译的（pi-natives-linux-x64），
+# 不需要 gcc/python3-dev。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git tini unzip xz-utils zip build-essential python3-dev \
+        ca-certificates curl git unzip xz-utils zip \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Bun（网关运行时）────────────────────────────────────────────────────────
+# Bun：安装器会把下载缓存放在 /opt/bun/install/cache（数百 MB，与 node_modules
+# 内容重复），装完立即删除，只保留二进制。
 ARG BUN_VERSION=1.4.4
 RUN mkdir -p /opt/bun \
     && curl -fsSL "https://bun.sh/install" | bash -s "bun-v${BUN_VERSION}" \
-    && ln -sf /opt/bun/bin/bun /usr/local/bin/bun
+    && rm -rf /opt/bun/install \
+    && ln -sf /opt/bun/bin/bun /usr/local/bin/bun \
+    && bun --version
 
-# ── Node 22 + npm（MCP server 生态）────────────────────────────────────────
-# 用 node 官方二进制覆盖基础镜像自带的旧 node；npm 保持随附版本
-# （npm@latest 已要求 node ≥22.22，镜像内 node 版本固定 22.x LTS，不必追新）。
+# Node：装到 /opt/node（运行时阶段直接 COPY 过来，避免重下一遍）
 ARG NODE_VERSION=22.14.0
-RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
-      | tar -xJ -C /usr/local --strip-components=1 \
-    && /usr/local/bin/node --version && /usr/local/bin/npm --version
+RUN mkdir -p /opt/node \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+      | tar -xJ -C /opt/node --strip-components=1 \
+    && PATH=/opt/node/bin:$PATH node --version \
+    && PATH=/opt/node/bin:$PATH npm --version \
+    # include/ 是编译原生插件用的 C++ 头文件，运行期用不到
+    && rm -rf /opt/node/include
 
-# ── Conda 环境（Python 侧 MCP server / 工具）───────────────────────────────
-# 预置一个 omp 环境：python 3.12 + pip + uv（uvx 拉 MCP server 常用）
-RUN conda create -y -n omp python=3.12 pip \
-    && conda clean -afy \
-    && /opt/conda/envs/omp/bin/pip install --no-cache-dir uv
-
-# uv 需要在任意 PATH 可达（MCP server 常以 `uvx` 启动）
-ENV PATH="/opt/conda/envs/omp/bin:${PATH}"
-
-# 登录 shell（bash -l）会读 profile.d：基础镜像的 conda.sh 会把 PATH 重置回
-# /opt/conda/condabin，导致 python/uv 在交互式与 agent 的 bash 工具里不可见。
-# 用 zz- 前缀（profile.d 末尾执行）覆盖回我们的顺序。
-RUN printf '%s\n' \
-      '# 网关镜像运行时 PATH：omp conda 环境 → bun → node/npm → 系统' \
-      'export PATH="/opt/conda/envs/omp/bin:/opt/bun/bin:/usr/local/bin:$PATH"' \
-      'if [ -f /opt/conda/etc/profile.d/conda.sh ]; then' \
-      '  . /opt/conda/etc/profile.d/conda.sh' \
-      '  conda activate omp 2>/dev/null || true' \
-      'fi' \
-      > /etc/profile.d/zz-omp-env.sh
-
-# ── 网关代码 ───────────────────────────────────────────────────────────────
 WORKDIR /app/gateway
 COPY package.json bun.lock bunfig.toml ./
+# 第一次安装：全量依赖（含 devDep），供类型检查使用
 RUN bun install --frozen-lockfile
 
 COPY tsconfig.json biome.json ./
 COPY src ./src
 COPY scripts ./scripts
 COPY test ./test
-
-# 预编译校验（构建期就能发现类型错误）
+# 构建期门禁：类型错误在镜像构建阶段就暴露
 RUN bun run typecheck
 
-# ── 运行时用户与挂载点 ─────────────────────────────────────────────────────
-# 非 root 运行；/workspace 由 compose 以宿主目录挂载（属主可能不同，
-# 因此容器内 uid 固定为 1000，与常见宿主用户一致）
-RUN mkdir -p /workspace /app/gateway/data \
-    && chown -R 1000:1000 /app/gateway /workspace \
-    && useradd --uid 1000 --create-home --shell /bin/bash omp \
-    && chown -R omp:omp /workspace
+# 换成只含生产依赖的 node_modules（去掉 typescript / bun-types / biome 等 devDep）
+RUN rm -rf node_modules && bun install --frozen-lockfile --production \
+    && rm -rf /opt/bun/install /root/.bun \
+    # 剔除只服务于 omp 交互式 TUI / 浏览器特性的前端依赖（约 -100MB）。
+    # 网关是 headless 服务：这些包只被 omp-stats（React 面板）与 browser/computer-use
+    # 特性引用，SDK 主链路不 import；已用真实模型会话验证（bash 工具调用 + turn.completed 正常）。
+    && rm -rf node_modules/lucide-react node_modules/react node_modules/react-dom \
+              node_modules/@types/react node_modules/@types/react-dom \
+              node_modules/puppeteer-core node_modules/chromium-bidi
 
-USER omp
-WORKDIR /app/gateway
+# ═══════════════════════════════════════════════════════════════════════════
+# 阶段 2：runtime —— 只保留运行期需要的东西
+# ═══════════════════════════════════════════════════════════════════════════
+FROM base AS runtime
 
-ENV GATEWAY_PORT=8787 \
+# 运行时系统依赖：git（workspace 的 git 面）、curl（健康检查）、ca-certificates（回调 HTTPS）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bun 二进制（builder 已装好，直接取；不含安装器缓存）
+COPY --from=builder /opt/bun/bin/bun /usr/local/bin/bun
+
+# Node 22 + npm（npm 侧 MCP server 需要）
+COPY --from=builder /opt/node /opt/node
+
+# Python 侧工具链：uv / uvx（Python MCP server 的包管理与 Python 版本管理）。
+# 不再另建独立的 conda env（+271MB，与基础镜像自带的 python 重复）：
+# base miniconda3 已提供 conda（python 3.14）；需要特定 Python 版本的 MCP server
+# 由 uvx 自行获取（uv python install），无需在镜像里预置。
+ARG UV_VERSION=0.13.8
+ENV UV_INSTALL_DIR=/usr/local/bin
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
+    && uv --version && uvx --version \
+    && rm -rf /root/.cache /root/.local/share
+
+# 登录 shell（bash -l）会读 profile.d：基础镜像的 conda.sh 会把 PATH 重置回
+# /opt/conda/condabin，导致 python/uv 在交互式与 agent 的 bash 工具里不可见。
+# 用 zz- 前缀（profile.d 末尾执行）覆盖回我们的顺序。
+RUN printf '%s\n' \
+      '# 网关镜像运行时 PATH：conda → bun → node/npm → uv → 系统' \
+      'export PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:$PATH"' \
+      'if [ -f /opt/conda/etc/profile.d/conda.sh ]; then' \
+      '  . /opt/conda/etc/profile.d/conda.sh' \
+      'fi' \
+      > /etc/profile.d/zz-omp-env.sh
+
+ENV PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:${PATH}" \
+    GATEWAY_PORT=8787 \
     GATEWAY_DATA_ROOT=/workspace/.omp-gateway \
     GATEWAY_EXPORT_DIR=/workspace/.omp-gateway/exports
+
+WORKDIR /app/gateway
+
+# 用 --chown 而非 chown -R：后者在 overlayfs 上会把整棵 node_modules 拷进新层（+500MB）
+COPY --from=builder --chown=1000:1000 /app/gateway/node_modules ./node_modules
+COPY --from=builder --chown=1000:1000 /app/gateway/src ./src
+COPY --from=builder --chown=1000:1000 /app/gateway/scripts ./scripts
+COPY --from=builder --chown=1000:1000 /app/gateway/package.json ./package.json
+COPY --from=builder --chown=1000:1000 /app/gateway/bunfig.toml ./bunfig.toml
+
+# 非 root 运行；/workspace 由 compose 以宿主目录挂载（属主可能不同，
+# 因此容器内 uid 固定为 1000，与常见宿主用户一致）
+RUN mkdir -p /workspace \
+    && useradd --uid 1000 --create-home --shell /bin/bash omp \
+    && chown omp:omp /workspace
+USER omp
 
 EXPOSE 8787
 

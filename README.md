@@ -22,7 +22,8 @@ omp gateway（本仓库：Bun + Hono + omp SDK）
 
 ### Docker（推荐）
 
-镜像内置 Bun（网关）+ Node 22/npm + Conda `omp`（python/uv）三套运行时；
+镜像内置 Bun（网关）+ Node 22/npm + Conda（python 3.14）+ uv/uvx 四套运行时，
+**多阶段构建，体积 2.14GB**（单阶段版本为 3.86GB）；
 **工作区根目录由宿主机挂载进容器**，会话产出与状态都在挂载卷里，宿主机可直接读写。
 
 ```bash
@@ -117,7 +118,7 @@ gateway/          # 网关（本 README 的主体）
     console/      #   控制台面板（panels）与写操作（actions）
   src/jobs/       # IdleCuller · TrashPurger · SnapshotPruner · Backup
   test/           # 单元 + 集成 + e2e（聊天/编码/SDK 能力/全旅程/审批/控制台/迁移）
-  Dockerfile      # Bun + Node/npm + Conda 三运行时；工作区根目录挂载点 /workspace
+  Dockerfile      # Bun + Node/npm + Conda/uv 多阶段构建；工作区根目录挂载点 /workspace
 contracts/        # 事件契约 schema + 前端映射契约 + 集成指南 + 错误码
 docs/DESIGN.md    # 设计定稿（33 节；§31 结构拆分 / §32 环境迁移）
 docs/SOP.md       # 运维手册（部署 / 接入 / 运维 / 迁移 / 排障 / 任务手册）

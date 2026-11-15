@@ -1271,3 +1271,47 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
 审计取证 / 扩容限额。每条都是可直接执行的命令序列。
 
 **验证**：`bun run lint` 0 诊断 · `bun run typecheck` 0 error · `bun run test` 296 pass / 0 fail（28 文件）。
+
+## 35. 镜像瘦身（M23）——多阶段构建，3.86GB → 2.14GB
+
+### 35.1 体积构成与处置
+
+单阶段镜像 3.86GB，其中约 **1.7GB 是可回收的构建期开销**：
+
+| 项 | 单阶段 | 处置 | 省 |
+|---|---:|---|---:|
+| bun 依赖下载缓存 `/opt/bun/install/cache` | 514MB | builder 装完即删（与 node_modules 内容重复） | 514MB |
+| `chown -R /app/gateway` 层 | 540MB | 改 `COPY --chown`（overlayfs 上 chown 会 copy-up 整棵子树） | 540MB |
+| 构建期工具链（build-essential + python3-dev） | 364MB | 只在 builder 阶段装（omp 原生模块是预编译的） | 364MB |
+| devDependencies（typescript/bun-types/biome） | ~14MB | builder 全量安装做 typecheck，runtime 只装生产依赖 | 14MB |
+| omp 交互式 TUI/浏览器前端依赖 | ~97MB | lucide-react / react / react-dom / puppeteer-core / chromium-bidi —— 网关是 headless 服务，SDK 主链路不 import | 97MB |
+| node 的 C++ 头文件 `include/` | 56MB | 编译原生插件才需要，运行期无用 | 56MB |
+| 独立 conda `omp` 环境（python 3.12 + pip） | 271MB | 与基础镜像 python 重复；改用 base conda + 独立 uv（uvx 自管 Python 版本） | 271MB |
+
+**结果：3.86GB → 2.14GB（-44%）**。
+
+### 35.2 结构
+
+```
+base (miniconda3)  ──┬─→ builder：全量依赖 → typecheck → 生产依赖 + 剔除前端依赖 → 删缓存
+                     └─→ runtime：bun/node 二进制 + conda + uv + 生产依赖（COPY --chown）+ src
+```
+
+关键约束：**剔除必须在 builder 阶段做**。在 runtime 阶段 `rm` 只是给 overlayfs 加 whiteout，
+被删字节仍留在下层，镜像不会变小。
+
+### 35.3 验证
+
+- 容器验收 15/15（健康/会话/注入/bootstrap/文件读写/openapi/导出导入往返）
+- **真实模型会话**：prompt 202 → bash 工具真实调用 → turn.completed → 正常回复（证明剔除前端依赖未伤 SDK 主链路）
+- 四套运行时在登录 shell 下均可达（python/uv/uvx/node/npm/bun/git）
+
+### 35.4 剩余体积的构成（2.14GB）
+
+| 项 | 体积 | 可否再降 |
+|---|---:|---|
+| miniconda3 基础镜像（conda 发行版 + python 3.14 base env） | ~560MB | 换 micromamba 可省 ~400MB，但 `conda` 命令会变成 `micromamba` |
+| `@oh-my-pi` SDK | 345MB | 其中 pi-natives-linux-x64 249MB 是 Rust 原生模块，运行时必需 |
+| node 22 + npm | 142MB | npm 生态 MCP server 需要 |
+| bun | 107MB | 网关运行时 |
+| 生产依赖其余部分 | ~160MB | SDK 依赖，必需 |

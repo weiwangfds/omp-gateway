@@ -38,9 +38,14 @@ curl -s -X POST $BASE/api/sessions/$SID/prompt \
 
 ### 1.1 Docker（推荐）
 
-镜像内置三套运行时：**Bun**（网关本体）、**Node 22 + npm**（npm 生态 MCP server）、**Conda `omp` 环境**
-（Python 侧 MCP server，含 `uv`/`uvx`）。工作区根目录由宿主机挂载进容器，容器内的会话产出
-与状态都落在挂载卷里，宿主机可直接读写。
+镜像内置四套运行时：**Bun**（网关本体）、**Node 22 + npm**（npm 生态 MCP server）、
+**Conda**（基础镜像自带，python 3.14）、**uv/uvx**（Python 侧 MCP server 的包管理与
+Python 版本管理）。工作区根目录由宿主机挂载进容器，容器内的会话产出与状态都落在挂载卷里，
+宿主机可直接读写。
+
+镜像为**多阶段构建，体积 2.14GB**（单阶段版本 3.86GB）：构建期工具链、bun 下载缓存、
+devDependencies、omp 交互式 TUI/浏览器前端依赖都不进最终镜像；构建阶段会跑 `bun run typecheck`，
+类型错误在 `docker build` 时就暴露。
 
 ```bash
 cd gateway && docker build -t omp-gateway:latest .
@@ -71,6 +76,9 @@ docker compose up -d
 | `/workspace/.omp-gateway` | `gateway.db` + `users/<uid>/`（会话、workspace、快照、agentDir） | 是 |
 | `/workspace/.omp-gateway/exports` | 环境迁移 bundle | 是 |
 | `/app/gateway` | 网关代码（只读运行） | 否 |
+
+容器内可用：`python`（conda base，3.14）、`uv`/`uvx`、`node`/`npm`、`bun`、`git`。
+MCP server 若需要特定 Python 版本，由 uvx 自行获取（`uvx --python 3.12 …`），无需在镜像里预置。
 
 > 挂载点属主与容器内 uid（1000）不一致时，容器内写入会 EACCES。用 `docker exec -u 0` 修一次属主即可。
 
