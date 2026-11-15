@@ -1272,9 +1272,9 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
 
 **验证**：`bun run lint` 0 诊断 · `bun run typecheck` 0 error · `bun run test` 296 pass / 0 fail（28 文件）。
 
-## 35. 镜像瘦身（M23）——多阶段构建，3.86GB → 2.14GB
+## 35. 镜像瘦身（M23/M24）——多阶段构建，3.86GB → 1.79GB
 
-### 35.1 体积构成与处置
+### 35.1 第一轮（M23）：构建期浪费
 
 单阶段镜像 3.86GB，其中约 **1.7GB 是可回收的构建期开销**：
 
@@ -1290,28 +1290,64 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
 
 **结果：3.86GB → 2.14GB（-44%）**。
 
-### 35.2 结构
+### 35.2 第二轮（M24）：继承来的层 + 看不见的符号
+
+2.14GB 里已没有"我们自己的浪费"了——剩下的两块是**基础镜像自带的**和**二进制里的调试信息**：
+
+| 项 | 体积 | 处置 | 省 |
+|---|---:|---|---:|
+| 官方 `continuumio/miniconda3` 自带的 apt 层：mercurial / subversion / python3.13 / libglib2.0 / libsm6 / libxext6 / libxrender1 / procps / wget | 208MB | 改为 `debian:trixie-slim` + **同一份 Miniconda 安装包**（版本 + sha256 固定） | ~160MB |
+| conda 的二进制与共享库带 `-g` 构建：DWARF + `.symtab`（libpython 与 python 本体各 28MB、libstdc++ 12MB…） | 103MB | `strip --strip-unneeded` | 103MB |
+| node 22 官方二进制自带 `.symtab`(13MB) + DWARF(2MB) | 15MB | 同上 | 15MB |
+| conda `share/doc` + `share/man`（其中 gettext 一家 13MB） | 25MB | 纯文档 | 25MB |
+| `@oh-my-pi/*/dist/types`（1577 个 `.d.ts`） | 20MB | 运行期走 `package.json` 的 `import` 条件（指向 `src/*.ts`）；typecheck 已在 builder 完成 | 20MB |
+| puppeteer-core 移除后残留的传递依赖（devtools-protocol / @puppeteer / webdriver-bidi-protocol） | 5MB | 一并删 | 5MB |
+| npm 自带 docs + man | 2.7MB | `npm help` 用不到 | 2.7MB |
+
+**结果：2.14GB → 1.79GB（再 -16%）**；累计 **3.86GB → 1.79GB（-54%）**。
+压缩拉取体积 579MB → 494MB，解压后 1.5GB → 1.3GB。
+
+两项关键判断的**依据**（不是"看起来没用"）：
+
+- **换 base 安全**：conda 版本（26.7.1）、python（3.14.7）、包管理器行为与官方镜像完全一致——同一份 installer，sha256 固定。
+  差异只在不再预装 conda 官方示例用的 GUI / 版本控制依赖；顺带摆脱该镜像的停更告示（Deprecation）。
+- **strip 安全**：动态链接器只查 `.dynsym`（strip 不动它），DWARF/`.symtab` 只供 gdb 与符号化。
+  剥离后实测：python C 扩展（`_ssl`/`_sqlite3`/`_ctypes`/`_hashlib`）导入正常、`pip install`（网络 + SSL）成功、
+  `conda list` 正常、node/npm/bun/uv 版本与执行正常。
+
+### 35.3 结构
 
 ```
-base (miniconda3)  ──┬─→ builder：全量依赖 → typecheck → 生产依赖 + 剔除前端依赖 → 删缓存
-                     └─→ runtime：bun/node 二进制 + conda + uv + 生产依赖（COPY --chown）+ src
+base (debian:trixie-slim)  ──┬─→ builder：全量依赖 → typecheck → 生产依赖 + 剔除 → strip node
+   + Miniconda（同层 strip）  └─→ runtime：bun/node 二进制 + conda + uv + 生产依赖（COPY --chown）+ src
 ```
 
-关键约束：**剔除必须在 builder 阶段做**。在 runtime 阶段 `rm` 只是给 overlayfs 加 whiteout，
-被删字节仍留在下层，镜像不会变小。
+### 35.4 两条 overlayfs 铁律（本轮踩到的坑）
 
-### 35.3 验证
+1. **whiteout 不减体积**：在被删文件所在层之后的层里 `rm`，只往文件系统加 whiteout，字节仍留在下层。
+   所以"剔除"必须与"创建"同层（或在更早的层）。
+2. **copy-up 会加倍**：在后续层**原地修改**文件（`chown -R`、`strip`、追加写）会把整个文件复制进新层，
+   旧副本仍在下层。本轮实测：strip 放在独立 `RUN` 时镜像**反而涨到 2.2GB**（1.3GB 合并视图 + 两层各存一份
+   的 333MB ELF）；并进 conda 安装那一层后降到 1.79GB。
 
-- 容器验收 15/15（健康/会话/注入/bootstrap/文件读写/openapi/导出导入往返）
-- **真实模型会话**：prompt 202 → bash 工具真实调用 → turn.completed → 正常回复（证明剔除前端依赖未伤 SDK 主链路）
-- 四套运行时在登录 shell 下均可达（python/uv/uvx/node/npm/bun/git）
+结论：凡是"装完再改"的优化，都必须塞进创建该文件的那一个 `RUN` 里。
 
-### 35.4 剩余体积的构成（2.14GB）
+### 35.5 验证
 
-| 项 | 体积 | 可否再降 |
+- 容器验收 **15/15**（健康/会话/注入/bootstrap/文件读写/openapi/导出导入往返）
+- **真实模型会话**：prompt 202 → `bash` 工具真实调用 → `turn.completed` → 回复 `omp-ok`
+- **镜像内跑完整测试套件**：`255 pass / 41 skip / 0 fail`（296 项，28 文件）——41 项是需要真实模型凭据的 e2e，自动跳过
+- 四套运行时在登录 shell 下均可达：python 3.14.7 / conda 26.7.1 / pip 26.2.1 / uv 0.13.8 / uvx / node 22.14.0 / npm 10.9.2 / bun 1.4.4 / git 2.47.3
+
+### 35.6 剩余体积的构成（1.79GB）与"故意不动"的清单
+
+| 项 | 体积 | 为什么不动 |
 |---|---:|---|
-| miniconda3 基础镜像（conda 发行版 + python 3.14 base env） | ~560MB | 换 micromamba 可省 ~400MB，但 `conda` 命令会变成 `micromamba` |
-| `@oh-my-pi` SDK | 345MB | 其中 pi-natives-linux-x64 249MB 是 Rust 原生模块，运行时必需 |
-| node 22 + npm | 142MB | npm 生态 MCP server 需要 |
+| pi-natives-linux-x64 的 modern + baseline 两份 `.node` | 248MB | 两份都已无符号可剥（text 75MB + rodata 31MB/份）。loader 按 AVX2 选 `modern`，并在 `TypeNotFound` 等场景回退 `baseline`（`loader-state.js`）——删 baseline = 老 CPU/异常主机直接不可用 |
+| conda（python 3.14 + conda/pip/rattler/libmamba） | ~407MB | 要求保留 `conda` 命令语义；换 micromamba 会改命令面 |
+| node 22 + npm | 117MB | npm 生态 MCP server 需要（`npx`） |
 | bun | 107MB | 网关运行时 |
-| 生产依赖其余部分 | ~160MB | SDK 依赖，必需 |
+| uv / uvx | 38MB | Python 侧包管理 |
+| omp CLI 打包产物 `dist/cli.js` | 19MB | `rpc-client` 与 legacy 插件兼容路径会解析它；删掉等于砍 RPC 与旧插件兼容 |
+| Debian 系统层（git 25MB + perl 55MB + glibc/ssl…） | ~185MB | git 依赖 perl；删 perl 会坏 `git add -p` / `send-email` / `svn` |
+

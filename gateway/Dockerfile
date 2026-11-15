@@ -3,22 +3,26 @@
 # 提供三套运行时，供 agent 在会话里按需调用：
 #   - Bun 1.4  ：网关本体（进程内嵌 omp SDK，不起 RPC/子进程）
 #   - Node 22  ：npm 生态的 MCP server / 工具链
-#   - Conda    ：Python 生态的 MCP server（uv/uvx 装包；conda 用基础镜像自带的）
+#   - Conda    ：Python 生态的 MCP server（uv/uvx 装包；conda 26.7 / python 3.14）
 #
 # 工作区根目录由外部挂载（见 docker-compose.yml 的 WORKSPACE_ROOT → /workspace）：
 # 网关的会话 workspace 与状态都落在挂载卷内，宿主机可直接读写、整体搬移（DESIGN §32）。
 #
-# 构建分两阶段（体积从 3.86GB 降到 2.14GB，-44%）：
-#   builder  装全量依赖（含 devDep）→ 跑 typecheck → 重装成只含生产依赖的 node_modules
-#            → 剔除 TUI/浏览器前端依赖与 node 头文件
+# 三阶段构建（体积 3.86GB → 1.2xGB，见 DESIGN §35）：
+#   base     debian-slim + 自建 Miniconda（installer 按 sha256 固定）→ 只有运行期真需要的系统包
+#   builder  装全量依赖（含 devDep）→ 跑 typecheck → 重装生产依赖 → 剔除运行期不加载的文件
 #   runtime  只拿运行期需要的东西：bun/node 二进制 + conda(python) + uv + 生产依赖 + 源码
-#            （COPY --chown 避免 chown -R 触发 overlayfs copy-up 把依赖再存一份）
+#
+# 为什么不用 continuumio/miniconda3：该镜像自带一层 208MB 的 apt 依赖
+# （mercurial / subversion / libglib / libsm6 / libxext6 / libxrender1 / python3.13 …），
+# 全是 conda 官方示例用的，网关用不到；且官方已宣布该镜像在 Miniconda 26.7.x 后停更。
+# 改成在 debian-slim 上跑同一份 Miniconda 安装包：conda 版本、python 版本、包管理器行为完全一致。
 #
 # 构建：docker build -t omp-gateway:latest gateway/
 # 运行：docker compose up -d
 
-# ── 基础镜像：Miniconda 提供 conda 环境（python/uv/科学计算栈）────────────────
-FROM continuumio/miniconda3:latest AS base
+# ── 基础层：Debian 13 slim + Miniconda（conda/python 与官方镜像同一份安装包）──────
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS base
 
 LABEL org.opencontainers.image.title="omp-gateway" \
       org.opencontainers.image.description="Multi-tenant omp session engine gateway (Hono + omp SDK, in-process)" \
@@ -32,15 +36,56 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CONDA_ALWAYS_YES=true \
     BUN_INSTALL=/opt/bun
 
+# bzip2：Miniconda 安装包的解压依赖；ca-certificates/curl：下载安装包 + 运行期回调
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates bzip2 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Miniconda：按版本号 + sha256 固定，与 continuumio/miniconda3 用的安装包一致
+# （conda 26.7.1 / python 3.14）。
+#
+# 安装 → 清理 → 剥离，全部在同一个 RUN 里：overlayfs 上后续层修改文件会触发 copy-up，
+# 同一文件会在两层各存一份（strip 会因此让镜像反而变大）。所以所有"改文件"的动作
+# 必须与"创建文件"同层。
+#   清理：*.a 静态库、*.js.map、包缓存（/opt/conda/pkgs）、纯文档（gettext/pcre2 的
+#         share/doc 就有 15MB）
+#   剥离：conda 的二进制/共享库是带 -g 构建的，DWARF + 符号表约 100MB
+#         （libpython、python 本体各 28MB，libstdc++ 12MB …），运行期完全用不到——
+#         动态链接器只查 .dynsym，strip 不会动它。binutils 同层装完即卸。
+ARG MINICONDA_VERSION=py314_26.7.1-1
+ARG MINICONDA_SHA256=e8b25b92b262499141c5bd57a98d3c008024185fa951494b9cd9b6d94e72338b
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends binutils; \
+    curl -fsSL "https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VERSION}-Linux-x86_64.sh" -o /tmp/miniconda.sh; \
+    echo "${MINICONDA_SHA256}  /tmp/miniconda.sh" | sha256sum -c -; \
+    bash /tmp/miniconda.sh -b -p /opt/conda; \
+    rm -f /tmp/miniconda.sh; \
+    /opt/conda/bin/conda tos accept || true; \
+    /opt/conda/bin/conda remove --force-remove -y conda-anaconda-tos || true; \
+    rm -rf /root/.conda/tos; \
+    find /opt/conda -follow -type f -name '*.a' -delete; \
+    find /opt/conda -follow -type f -name '*.js.map' -delete; \
+    /opt/conda/bin/conda clean -afy; \
+    find /opt/conda/share/doc /opt/conda/share/man -mindepth 1 -delete; \
+    find /opt/conda -type f \( -name '*.so' -o -name '*.so.*' \) \
+        -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    find /opt/conda/bin -maxdepth 1 -type f \
+        -exec strip --strip-unneeded {} + 2>/dev/null || true; \
+    apt-get purge -y --auto-remove binutils; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 阶段 1：builder —— 依赖安装 + 类型检查 + 产出生产依赖
 # ═══════════════════════════════════════════════════════════════════════════
 FROM base AS builder
 
 # 构建期工具链只在这一层；omp 的原生模块是预编译的（pi-natives-linux-x64），
-# 不需要 gcc/python3-dev。
+# 不需要 gcc/python3-dev。git 供 bun install 拉 git 依赖。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git unzip xz-utils zip \
+        git unzip xz-utils zip binutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Bun：安装器会把下载缓存放在 /opt/bun/install/cache（数百 MB，与 node_modules
@@ -60,7 +105,11 @@ RUN mkdir -p /opt/node \
     && PATH=/opt/node/bin:$PATH node --version \
     && PATH=/opt/node/bin:$PATH npm --version \
     # include/ 是编译原生插件用的 C++ 头文件，运行期用不到
-    && rm -rf /opt/node/include
+    && rm -rf /opt/node/include \
+    # 官方 node 二进制带符号表（.symtab 13MB + DWARF 2MB），运行期只用 .dynsym
+    && strip --strip-unneeded /opt/node/bin/node \
+    # npm 自带的文档/手册页（2.7MB），`npm help` 用；`npm install` 不受影响
+    && rm -rf /opt/node/lib/node_modules/npm/docs /opt/node/lib/node_modules/npm/man
 
 WORKDIR /app/gateway
 COPY package.json bun.lock bunfig.toml ./
@@ -82,16 +131,27 @@ RUN rm -rf node_modules && bun install --frozen-lockfile --production \
     # 特性引用，SDK 主链路不 import；已用真实模型会话验证（bash 工具调用 + turn.completed 正常）。
     && rm -rf node_modules/lucide-react node_modules/react node_modules/react-dom \
               node_modules/@types/react node_modules/@types/react-dom \
-              node_modules/puppeteer-core node_modules/chromium-bidi
+              node_modules/puppeteer-core node_modules/chromium-bidi \
+    # puppeteer-core 移除后残留的传递依赖（仅浏览器特性使用）
+              node_modules/@puppeteer node_modules/devtools-protocol \
+              node_modules/webdriver-bidi-protocol \
+    # 类型声明（.d.ts）只在 tsc 阶段有用：运行时走 package.json 的 import 条件
+    # （指向 src/*.ts），构建期 typecheck 已在上面完成
+    && rm -rf node_modules/@oh-my-pi/*/dist/types
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 阶段 2：runtime —— 只保留运行期需要的东西
 # ═══════════════════════════════════════════════════════════════════════════
 FROM base AS runtime
 
-# 运行时系统依赖：git（workspace 的 git 面）、curl（健康检查）、ca-certificates（回调 HTTPS）
+# 运行时系统依赖（与改造前的能力对齐）：
+#   git / openssh-client —— workspace 的 git 面（含 git+ssh）
+#   curl / ca-certificates —— 健康检查与 HTTPS 回调
+#   procps —— agent 的 shell 工具常用 ps
+#   wget / bzip2 —— 会话内下载与解压
+#   tini —— PID 1，转发 SIGTERM 让优雅关停跑完
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git tini \
+        ca-certificates curl git openssh-client bzip2 procps wget tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Bun 二进制（builder 已装好，直接取；不含安装器缓存）
@@ -101,17 +161,16 @@ COPY --from=builder /opt/bun/bin/bun /usr/local/bin/bun
 COPY --from=builder /opt/node /opt/node
 
 # Python 侧工具链：uv / uvx（Python MCP server 的包管理与 Python 版本管理）。
-# 不再另建独立的 conda env（+271MB，与基础镜像自带的 python 重复）：
-# base miniconda3 已提供 conda（python 3.14）；需要特定 Python 版本的 MCP server
-# 由 uvx 自行获取（uv python install），无需在镜像里预置。
+# 不另建独立 conda env（与基础镜像自带的 python 重复）：base 已提供 conda（python 3.14）；
+# 需要特定 Python 版本的 MCP server 由 uvx 自行获取（uv python install），无需预置。
 ARG UV_VERSION=0.13.8
 ENV UV_INSTALL_DIR=/usr/local/bin
 RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
     && uv --version && uvx --version \
     && rm -rf /root/.cache /root/.local/share
 
-# 登录 shell（bash -l）会读 profile.d：基础镜像的 conda.sh 会把 PATH 重置回
-# /opt/conda/condabin，导致 python/uv 在交互式与 agent 的 bash 工具里不可见。
+# 登录 shell（bash -l）会读 profile.d：conda.sh 会把 PATH 重置回 /opt/conda/condabin，
+# 导致 python/uv 在交互式与 agent 的 bash 工具里不可见。
 # 用 zz- 前缀（profile.d 末尾执行）覆盖回我们的顺序。
 RUN printf '%s\n' \
       '# 网关镜像运行时 PATH：conda → bun → node/npm → uv → 系统' \

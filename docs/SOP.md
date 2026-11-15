@@ -39,13 +39,13 @@ curl -s -X POST $BASE/api/sessions/$SID/prompt \
 ### 1.1 Docker（推荐）
 
 镜像内置四套运行时：**Bun**（网关本体）、**Node 22 + npm**（npm 生态 MCP server）、
-**Conda**（基础镜像自带，python 3.14）、**uv/uvx**（Python 侧 MCP server 的包管理与
+**Conda**（自建 Miniconda，conda 26.7 / python 3.14）、**uv/uvx**（Python 侧 MCP server 的包管理与
 Python 版本管理）。工作区根目录由宿主机挂载进容器，容器内的会话产出与状态都落在挂载卷里，
 宿主机可直接读写。
 
-镜像为**多阶段构建，体积 2.14GB**（单阶段版本 3.86GB）：构建期工具链、bun 下载缓存、
-devDependencies、omp 交互式 TUI/浏览器前端依赖都不进最终镜像；构建阶段会跑 `bun run typecheck`，
-类型错误在 `docker build` 时就暴露。
+镜像为**三阶段构建，体积 1.79GB**（首版单阶段 3.86GB，逐步处置见 DESIGN §35）：构建期工具链、
+bun 下载缓存、devDependencies、omp 交互式 TUI/浏览器前端依赖、conda 的调试符号与文档、
+类型声明都不进最终镜像；构建阶段会跑 `bun run typecheck`，类型错误在 `docker build` 时就暴露。
 
 ```bash
 cd gateway && docker build -t omp-gateway:latest .
