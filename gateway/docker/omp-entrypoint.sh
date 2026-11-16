@@ -23,8 +23,11 @@ export HOME
 # 挂载点属主通常是宿主用户而不是容器内 uid 1000，改不动就只告警：
 # 宿主机侧执行 chmod 777 <WORKSPACE_ROOT> 即可（compose 的 volumes 不带权限）。
 if [ -d /workspace ]; then
-  if ! chmod 0777 /workspace 2>/dev/null; then
-    log "警告：/workspace 无法 chmod（属主不是 uid 1000）→ 请在宿主机 chmod 777 <WORKSPACE_ROOT>"
+  # 能 chmod 就 chmod；chmod 失败但本来就可写（Docker Desktop 的挂载对 chmod 返回 EPERM）
+  # 不算问题——只在真的不可写时才告警。
+  chmod 0777 /workspace 2>/dev/null || true
+  if [ ! -w /workspace ]; then
+    log "警告：/workspace 不可写（属主不是 uid 1000 且不是 777）→ 请在宿主机执行 chmod 777 <WORKSPACE_ROOT>；否则网关创建数据根时会 EACCES"
   fi
 fi
 

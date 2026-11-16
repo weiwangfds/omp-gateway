@@ -86,6 +86,12 @@ MCP server 若需要特定 Python 版本，由 uvx 自行获取（`uvx --python 
 > 不受 umask 影响。要收紧就设 `OMP_UMASK=0027`（文件 640 / 目录 750），根目录仍保持 777。
 > Docker Desktop（Windows/macOS）的挂载天然是 777；Linux 宿主若挂载点是 `root:755`，
 > 启动脚本会尝试 chmod，失败时打警告——在宿主机 `chmod 777 <WORKSPACE_ROOT>` 一次即可。
+>
+> **777 的边界**：它只让宿主机与容器**共享挂载卷这棵目录树的内容**（bind mount 两端是同一个 inode，
+> 所以容器内 chmod 会同步到宿主目录——这正是想要的）。它**不等于容器能操作宿主**：
+> 容器非特权、无额外 capability（会话进程 `CapEff=0`，连 `CAP_DAC_OVERRIDE` 都没有）、
+> PID/网络命名空间独立、不挂 docker socket，宿主只暴露 `/workspace` 这一个挂载点。
+> 要把共享面再缩小，就把 `WORKSPACE_ROOT` 指向一个更小的子目录。
 
 ### 1.2 本机运行
 
@@ -267,6 +273,8 @@ drain 只拒新会话并让健康检查失败；**已有会话继续跑完**。�
 | 工具调用挂住等审批 | 审批策略为 always-ask 且未决策 | SSE `tool.confirm_required` → `POST /:sid/approvals/:id {"approve":true}`；超时后端自动拒绝 || 事件不来了 | 未先订阅 SSE | 先 `GET /:sid/events` 建立订阅再 `POST /:sid/prompt`（协议要求） |
 | 404 `NOT_FOUND` 查不到会话 | 跨租户或已删除 | 网关不区分"不存在"与"无权访问"（防枚举） |
 | MCP 工具不出现 | `enableMcp=false` 或 `mcp.json` 未合成 | `POST /:sid/mcp/reload`；检查 `GET /api/me/mcp` |
+| 容器启动即退出，日志 `EACCES: mkdir '/workspace/.omp-gateway'` | 挂载点对容器 uid 1000 不可写（Linux 宿主常见：宿主目录 `root:755`） | 宿主机 `chmod 777 <WORKSPACE_ROOT>`；启动日志里会先有一行 `[omp-entrypoint] 警告：/workspace 不可写` |
+| 会话内 `pip install` 报 `Permission denied` | 用了自定义 `--user`/venv 之外的路径，或镜像被改过权限 | 镜像默认 `/opt/conda` 归 uid 1000；若自行 `chown` 过，恢复 `chown -R 1000:1000 /opt/conda` |
 
 ## 4. 环境迁移（换机 / 换盘 / 蓝绿切换）
 
