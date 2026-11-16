@@ -25,7 +25,8 @@ omp gateway（本仓库：Bun + Hono + omp SDK）
 镜像内置 Bun（网关）+ Node 22/npm + Conda（python 3.14）+ uv/uvx 四套运行时，
 **三阶段构建，体积 1.65GB**（首版单阶段 3.86GB，见 DESIGN §35）；
 Base 为 debian-slim + 固定 sha256 的 Miniconda 安装包（与官方镜像同一份，conda 26.7 / python 3.14）；
-**工作区根目录由宿主机挂载进容器**，会话产出与状态都在挂载卷里，宿主机可直接读写。
+**工作区根目录由宿主机挂载进容器**，会话产出与状态都在挂载卷里，宿主机可直接读写
+（根目录固定 777，容器内新建文件默认 666/777，`OMP_UMASK` 可收紧；凭证目录仍是 700，见 DESIGN §37）。
 
 ```bash
 cd gateway && docker build -t omp-gateway:latest .

@@ -52,6 +52,8 @@ services:
       UV_SYSTEM_CERTS: "${UV_SYSTEM_CERTS:-}"
       UV_INSECURE_HOST: "${UV_INSECURE_HOST:-}"
       PIP_CERT: "${PIP_CERT:-}"
+      # 容器内新建文件的 umask（默认 0000 → 666/777，宿主机可写；收紧用 0027）
+      OMP_UMASK: "${OMP_UMASK:-}"
     volumes:
       # 工作区根目录对外挂载：宿主机可见、可直接编辑会话产出
       - "${WORKSPACE_ROOT:-./workspace}:/workspace"

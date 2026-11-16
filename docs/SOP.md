@@ -80,7 +80,12 @@ docker compose up -d
 容器内可用：`python`（conda base，3.14）、`uv`/`uvx`、`node`/`npm`、`bun`、`git`。
 MCP server 若需要特定 Python 版本，由 uvx 自行获取（`uvx --python 3.12 …`），无需在镜像里预置。
 
-> 挂载点属主与容器内 uid（1000）不一致时，容器内写入会 EACCES。用 `docker exec -u 0` 修一次属主即可。
+> **挂载点权限**：`/workspace` 根目录固定 **777**，容器内新建的文件默认 **666 / 目录 777**
+> （`OMP_UMASK` 默认 `0000`），所以宿主机不必与容器 uid（1000）对齐就能直接改会话产出；
+> 每个会话的 workspace 根目录也会显式 `chmod 777`。凭证目录 `<dataRoot>/users/<uid>/agent` 是 **700**，
+> 不受 umask 影响。要收紧就设 `OMP_UMASK=0027`（文件 640 / 目录 750），根目录仍保持 777。
+> Docker Desktop（Windows/macOS）的挂载天然是 777；Linux 宿主若挂载点是 `root:755`，
+> 启动脚本会尝试 chmod，失败时打警告——在宿主机 `chmod 777 <WORKSPACE_ROOT>` 一次即可。
 
 ### 1.2 本机运行
 

@@ -90,7 +90,10 @@ RUN set -eux; \
     find /opt/conda/bin -maxdepth 1 -type f \
         -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     apt-get purge -y --auto-remove binutils; \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/*; \
+    # 让容器内的非 root 用户（uid 1000）能 pip/conda install：镜像作为 omp 运行时，
+    # agent 会在会话里装包。必须与安装同层（后续层 chown 会 copy-up 整个 /opt/conda）。
+    chown -R 1000:1000 /opt/conda
 
 ENV PATH="/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -126,7 +129,9 @@ RUN mkdir -p /opt/node \
     # 官方 node 二进制带符号表（.symtab 13MB + DWARF 2MB），运行期只用 .dynsym
     && strip --strip-unneeded /opt/node/bin/node \
     # npm 自带的文档/手册页（2.7MB），`npm help` 用；`npm install` 不受影响
-    && rm -rf /opt/node/lib/node_modules/npm/docs /opt/node/lib/node_modules/npm/man
+    && rm -rf /opt/node/lib/node_modules/npm/docs /opt/node/lib/node_modules/npm/man \
+    # 让 uid 1000 能 `npm i -g`（改动同层，运行时 COPY 会保留属主）
+    && chown -R 1000:1000 /opt/node
 
 WORKDIR /app/gateway
 COPY package.json bun.lock bunfig.toml ./
@@ -174,8 +179,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Bun 二进制（builder 已装好，直接取；不含安装器缓存）
 COPY --from=builder /opt/bun/bin/bun /usr/local/bin/bun
 
-# Node 22 + npm（npm 侧 MCP server 需要）
-COPY --from=builder /opt/node /opt/node
+# Node 22 + npm（npm 侧 MCP server 需要）；属主给 1000，`npm i -g` 才写得进去
+# （node 二进制本身在 builder 已 strip，这里用 --chown 而非事后 chown，避免 copy-up）
+COPY --from=builder --chown=1000:1000 /opt/node /opt/node
 
 # Python 侧工具链：uv / uvx（Python MCP server 的包管理与 Python 版本管理）。
 # 不另建独立 conda env（与基础镜像自带的 python 重复）：base 已提供 conda（python 3.14）；
@@ -191,7 +197,7 @@ RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
 # 用 zz- 前缀（profile.d 末尾执行）覆盖回我们的顺序。
 RUN printf '%s\n' \
       '# 网关镜像运行时 PATH：conda → bun → node/npm → uv → 系统' \
-      'export PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:$PATH"' \
+      'export PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"' \
       'if [ -f /opt/conda/etc/profile.d/conda.sh ]; then' \
       '  . /opt/conda/etc/profile.d/conda.sh' \
       'fi' \
@@ -201,10 +207,15 @@ RUN printf '%s\n' \
       'fi' \
       > /etc/profile.d/zz-omp-env.sh
 
-ENV PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:${PATH}" \
+ENV PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:/home/omp/.local/bin:/home/omp/.bun/bin:${PATH}" \
     GATEWAY_PORT=8787 \
     GATEWAY_DATA_ROOT=/workspace/.omp-gateway \
     GATEWAY_EXPORT_DIR=/workspace/.omp-gateway/exports
+
+# 作为 omp 运行时，agent 会在会话里用 bun 的全局安装 / bunx：把 BUN_INSTALL 从构建期的
+# /opt/bun（root 只读）改到用户目录，并补上 bunx（官方安装器本来就有，我们只拷了 bun 二进制）
+ENV BUN_INSTALL=/home/omp/.bun
+RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
 
 WORKDIR /app/gateway
 
@@ -221,9 +232,14 @@ COPY --chmod=755 docker/omp-entrypoint.sh /usr/local/bin/omp-entrypoint.sh
 
 # 非 root 运行；/workspace 由 compose 以宿主目录挂载（属主可能不同，
 # 因此容器内 uid 固定为 1000，与常见宿主用户一致）
+# 非 root 运行；/workspace 由 compose 以宿主目录挂载（属主可能不同，
+# 因此容器内 uid 固定为 1000，与常见宿主用户一致）。
+# 挂载点给 777：宿主机可直接读写会话产出，不依赖 uid 对齐（启动脚本还会再兜一次）。
 RUN mkdir -p /workspace \
     && useradd --uid 1000 --create-home --shell /bin/bash omp \
-    && chown omp:omp /workspace
+    && mkdir -p /home/omp/.local/bin /home/omp/.bun/bin \
+    && chown -R omp:omp /workspace /home/omp/.local /home/omp/.bun \
+    && chmod 0777 /workspace
 USER omp
 
 EXPOSE 8787

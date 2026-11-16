@@ -32,6 +32,9 @@ export async function prepareWorkspace(userId: string, sid: string, copyWorkspac
   const { userWorkspace } = await import("./paths.ts");
   const workspaceDir = userWorkspace(userId, sid);
   await fs.mkdir(workspaceDir, { recursive: true });
+  // workspace 根目录给 777：宿主机（可能是另一个 uid）要能直接读写会话产出。
+  // 失败不影响创建（Windows 挂载不支持 chmod 时会报 EPERM）。
+  await fs.chmod(workspaceDir, 0o777).catch(() => {});
   if (copyWorkspaceFrom) {
     try {
       await fs.cp(copyWorkspaceFrom, workspaceDir, { recursive: true, force: true });

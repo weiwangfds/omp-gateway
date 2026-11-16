@@ -19,6 +19,18 @@ log() { printf '[omp-entrypoint] %s\n' "$*" >&2; }
 HOME="${HOME:-/home/omp}"
 export HOME
 
+# ── 工作区根目录：777（宿主机可直接读写会话产出，不依赖 uid 对齐）──────────
+# 挂载点属主通常是宿主用户而不是容器内 uid 1000，改不动就只告警：
+# 宿主机侧执行 chmod 777 <WORKSPACE_ROOT> 即可（compose 的 volumes 不带权限）。
+if [ -d /workspace ]; then
+  if ! chmod 0777 /workspace 2>/dev/null; then
+    log "警告：/workspace 无法 chmod（属主不是 uid 1000）→ 请在宿主机 chmod 777 <WORKSPACE_ROOT>"
+  fi
+fi
+
+# 新建文件默认对宿主机可写（666/777）。要收紧就设 OMP_UMASK=0027。
+umask "${OMP_UMASK:-0000}" 2>/dev/null || umask 0022
+
 mkdir -p "$HOME/.config/omp"
 
 # ── pip ────────────────────────────────────────────────────────────────────

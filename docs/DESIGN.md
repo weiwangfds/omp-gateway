@@ -1409,3 +1409,27 @@ SIGTERM 优雅关停与退出码不受影响。
 - 内网全配：四个配置文件内容/权限正确；`pip download` 首行显示内网 index；`npm view` 命中镜像；
   `uvx --python 3.14` 成功；`uv python install 3.12` 快速失败并提示 `Python downloads are not allowed`。
 - 完全不配：五个配置文件均不存在，容器 `readyz` 正常、验收 15/15。
+
+## 37. 运行期权限模型（M27）——workspace 777，凭证仍在边界内
+
+镜像要作为 **omp 运行时**交给会话用，宿主机还要能直接读改会话产出。宿主机 uid 与容器内
+uid（1000）不一致是常态，所以权限不能靠"uid 对齐"，只能靠显式模式。
+
+| 对象 | 模式 | 谁需要写 |
+|---|---|---|
+| `/workspace`（宿主挂载根） | **777**（镜像内 chmod；启动脚本再兜一次，改不动只告警） | 宿主机 + 容器 |
+| `<dataRoot>`、`users/<uid>`、`users/<uid>/workspaces/<sid>` | **777** | 同上（session workspace 由 `prepareWorkspace` 显式 chmod） |
+| 容器内新建的文件（agent 写出的代码/文档） | **666**（`OMP_UMASK=0000`） | 宿主机 + 容器 |
+| `<dataRoot>/users/<uid>/agent`（凭据、models.yml） | **700**（代码显式设置） | 只有容器用户 |
+| `.omp-*` 配置（pip.conf/.npmrc/uv.toml/.condarc/env.sh） | 600 | 只有容器用户 |
+
+要点：
+
+1. **umask 只在启动脚本里设**（`OMP_UMASK`，默认 `0000`），所以"容器新建的东西宿主机都能改"是默认行为；
+   想收紧用 `OMP_UMASK=0027`（文件 640 / 目录 750），根目录仍 777。
+2. **凭证边界不随 umask 打开**：SDK 的 `agentDir` 是显式 `0o700`，`chmod` 式显式模式不受 umask 影响——
+   世界可写的是工作产出，不是 API key。
+3. **SQLite 的 DB 仍是 644**（SQLite 自己按 0644 建文件）：别人能读、不能写；
+   要改它就等于能删它——而挂载根 777 已经意味着这一点，所以这不是新的暴露面。
+4. **Docker Desktop 的挂载本来就是 777**（Windows/macOS 由 VM 映射），这条规则主要照顾 Linux 宿主；
+   宿主目录是 `root:755` 时容器内 chmod 会 EPERM，脚本告警，需宿主侧执行一次 `chmod 777`。
