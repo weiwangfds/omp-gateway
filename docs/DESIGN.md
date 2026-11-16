@@ -1371,3 +1371,41 @@ base (debian:trixie-slim)  ──┬─→ builder：全量依赖 → typecheck 
 | omp CLI 打包产物 `dist/cli.js` | 19MB | `rpc-client` 与 legacy 插件兼容路径会解析它；删掉等于砍 RPC 与旧插件兼容 |
 | Debian 系统层（git 25MB + perl 55MB + glibc/ssl…） | ~185MB | git 依赖 perl；删 perl 会坏 `git add -p` / `send-email` / `svn` |
 
+
+## 36. 包管理器镜像源（M26）——启动期注入，内网可部署
+
+内网部署时只有 **conda / pip / npm** 镜像；uv 的默认索引与 Python 解释器下载（GitHub release）都不可达。
+而网关跑的是**会话**：agent 会在会话里 `pip install`、`npx`、`uvx`、`conda install`。
+所以镜像源必须是**运行时**可配的，不能烘进镜像。
+
+### 36.1 落地位置
+
+| 落地 | 覆盖 | 备注 |
+|---|---|---|
+| `~/.config/pip/pip.conf` | pip（含 venv 内的 pip） | 必须有 `[global]` 段头——缺了 pip 报 `File contains no section headers` 并拒载（实测踩到） |
+| `~/.npmrc` | npm / npx | `registry=` |
+| `~/.config/uv/uv.toml` | uv / uvx | uv **不读** pip.conf，要单独写：`[[index]]`、`python-install-mirror`、`python-downloads`、`system-certs`、`allow-insecure-host` |
+| `~/.condarc` | conda | `channels` + `default_channels`（后者让 `defaults` 这个别名也指向镜像，否则会回落到 repo.anaconda.com） |
+| `~/.config/omp/env.sh` | 登录 shell | uv 只认环境变量；`/etc/profile.d/zz-omp-env.sh` 在末尾 source 它，`docker exec bash -l` 与 agent 的 bash 工具看到同一套 |
+
+入口是 `docker/omp-entrypoint.sh`，以 `exec "$@"` 收尾——进程结构仍是 tini → bun（单进程），
+SIGTERM 优雅关停与退出码不受影响。
+
+### 36.2 三个设计判断
+
+1. **启动期而不是构建期**：这些源只作用于会话里现装的包；构建期烘死的只有网关自己的 node_modules 与 conda base。
+2. **文件 + 环境变量双写**：文件覆盖"不继承 env 的登录 shell / 子进程"，env 覆盖"只认环境变量的 uv"。
+3. **一律可选**：任一变量未设置就完全不落文件（默认行为与公网部署一致，验收 15/15 不受影响）；
+   配置文件权限 `600`，因为源地址里可能带 token。
+
+### 36.3 与 uv 有关的两个坑（实测）
+
+- `UV_NATIVE_TLS=1` 在 uv 0.13.8 已弃用（告警建议 `UV_SYSTEM_CERTS`）→ 改写 `system-certs = true`，无告警。
+- `uv python install` 的下载源是 GitHub release：内网必须 `UV_PYTHON_INSTALL_MIRROR` 或 `UV_PYTHON_DOWNLOADS=never`。
+  `uvx --python 3.14 …` 用镜像自带的 conda python，无需下载（实测装上并运行了 pygments）。
+
+### 36.4 验证
+
+- 内网全配：四个配置文件内容/权限正确；`pip download` 首行显示内网 index；`npm view` 命中镜像；
+  `uvx --python 3.14` 成功；`uv python install 3.12` 快速失败并提示 `Python downloads are not allowed`。
+- 完全不配：五个配置文件均不存在，容器 `readyz` 正常、验收 15/15。

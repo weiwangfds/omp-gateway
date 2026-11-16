@@ -34,6 +34,24 @@ services:
       # 定时备份目录（VACUUM INTO 一致快照）
       GATEWAY_BACKUP_DIR: /workspace/.omp-gateway/backups
       GATEWAY_BACKUP_INTERVAL_MIN: "${GATEWAY_BACKUP_INTERVAL_MIN:-60}"
+      # ── 内网镜像源（可选，DESIGN §36）────────────────────────────────────
+      # 启动时固化成 pip.conf / .npmrc / .condarc，只影响会话里现装的包
+      # （agent 的 pip/npm、MCP server 的 npx/uvx），不影响镜像自带依赖。
+      # 留空 = 不写任何配置，走上游默认源。
+      PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+      PIP_EXTRA_INDEX_URL: "${PIP_EXTRA_INDEX_URL:-}"
+      PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
+      NPM_CONFIG_REGISTRY: "${NPM_CONFIG_REGISTRY:-}"
+      CONDA_CHANNELS: "${CONDA_CHANNELS:-}"
+      CONDA_DEFAULT_CHANNELS: "${CONDA_DEFAULT_CHANNELS:-}"
+      # uv：内网时索引跟 pip 源；Python 解释器默认从 GitHub 下载，连不上就指镜像或关掉
+      UV_DEFAULT_INDEX: "${UV_DEFAULT_INDEX:-}"
+      UV_PYTHON_INSTALL_MIRROR: "${UV_PYTHON_INSTALL_MIRROR:-}"
+      UV_PYTHON_DOWNLOADS: "${UV_PYTHON_DOWNLOADS:-}"
+      UV_NATIVE_TLS: "${UV_NATIVE_TLS:-}"          # uv 旧名，等价 UV_SYSTEM_CERTS
+      UV_SYSTEM_CERTS: "${UV_SYSTEM_CERTS:-}"
+      UV_INSECURE_HOST: "${UV_INSECURE_HOST:-}"
+      PIP_CERT: "${PIP_CERT:-}"
     volumes:
       # 工作区根目录对外挂载：宿主机可见、可直接编辑会话产出
       - "${WORKSPACE_ROOT:-./workspace}:/workspace"

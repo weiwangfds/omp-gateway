@@ -118,6 +118,61 @@ bun dev                       # http://127.0.0.1:8787
 限额改法有三条，优先级从高到低：`PATCH /internal/users/:uid/limits`（单用户）→
 `GATEWAY_DEFAULT_*`（全局默认）→ `tenants.limits_json`（DB 持久化）。
 
+### 1.4 内网部署：包管理器镜像源
+
+内网机器通常只有 **conda / pip / npm** 镜像；公网源（包括 uv 的默认索引和它的 Python 解释器下载）
+不可达。镜像启动时会把这些环境变量固化成 `$HOME` 下的配置，**只影响会话里现装的包**
+（agent 的 `pip`/`npm`、MCP server 的 `npx`/`uvx`/`conda`），镜像自带的依赖不受影响。
+一个都不设 = 一行都不写，保持上游默认行为。
+
+| 变量 | 落到 | 作用 |
+|---|---|---|
+| `PIP_INDEX_URL` | `~/.config/pip/pip.conf` | pip 主源；**也是 uv 的默认索引** |
+| `PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST` / `PIP_CERT` | 同上 | 附加源 / http 或自签源 / 自签 CA |
+| `NPM_CONFIG_REGISTRY` | `~/.npmrc` | npm、npx 源 |
+| `CONDA_CHANNELS` / `CONDA_DEFAULT_CHANNELS` | `~/.condarc` | conda 搜索源 / 把 `defaults` 也指到镜像 |
+| `UV_DEFAULT_INDEX` | `~/.config/uv/uv.toml` | uv 索引；不设则跟随 `PIP_INDEX_URL` |
+| `UV_PYTHON_INSTALL_MIRROR` | 同上 | uv 装 Python 解释器的镜像（默认去 GitHub） |
+| `UV_PYTHON_DOWNLOADS=never` | 同上 | 禁止 uv 下载解释器，只用镜像自带 conda python 3.14 |
+| `UV_SYSTEM_CERTS=1`（旧名 `UV_NATIVE_TLS`） | 同上 | uv 用系统证书库（内网 CA 已装进系统时） |
+| `UV_INSECURE_HOST` | 同上 | 指定 host 跳过 TLS 校验（自签且不想配 CA 时） |
+
+配置文件权限 `600`（源地址里可能带 token）；同时写 `~/.config/omp/env.sh`，登录 shell 自动 source，
+所以 `docker exec -it omp-gateway bash -l` 与 agent 的 bash 工具看到的是同一套配置。
+
+最小内网配置（写进 compose 的 `.env`）：
+
+```bash
+PIP_INDEX_URL=https://nexus.internal/repository/pypi-proxy/simple
+NPM_CONFIG_REGISTRY=https://nexus.internal/repository/npm-proxy/
+CONDA_CHANNELS=https://nexus.internal/repository/conda-main
+# uv 索引自动跟随 PIP_INDEX_URL；解释器二选一：
+UV_PYTHON_DOWNLOADS=never
+# UV_PYTHON_INSTALL_MIRROR=https://nexus.internal/python-build-standalone
+```
+
+自检（容器内，四条都应通过）：
+
+```bash
+docker exec omp-gateway bash -lc '
+  pip config list
+  npm config get registry
+  conda config --show channels default_channels
+  uvx --python 3.14 --from pygments pygmentize -V    # 走内网索引 + 系统 python，不下载解释器
+  pip download --no-deps -d /tmp/x six -v | head -1  # 第一行应显示内网 index
+'
+```
+
+三个内网特有的注意点：
+
+1. **uvx 的解释器**：`uvx --python 3.12` 默认去 GitHub 下载 python-build-standalone，内网必失败。
+   给 `UV_PYTHON_INSTALL_MIRROR`，或用 `UV_PYTHON_DOWNLOADS=never` 只用镜像自带的 3.14
+   （`uvx --python 3.14 …` 已实测可用）。
+2. **只装 wheel**：镜像里没有编译器，pip/uv 遇到只有 sdist 的包会失败——内网镜像需提供 wheel。
+3. **镜像本身怎么进内网**：`Dockerfile` 构建要拉 debian / bun / node / miniconda，内网一般拉不到。
+   在有网机器上 `docker build` 后 `docker save omp-gateway:latest | gzip > omp-gateway.tar.gz`，
+   内网 `docker load` 即可；只在有网机器上装一次，之后升级同样走 tar。
+
 ## 2. 接入（上游侧）
 
 ### 2.1 身份与凭据

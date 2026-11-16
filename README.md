@@ -33,6 +33,11 @@ WORKSPACE_ROOT=/srv/omp-workspace GATEWAY_SERVICE_TOKENS=change-me \
   docker compose up -d
 ```
 
+> **内网部署**（只有 conda / pip / npm 镜像，uv 公网出不去）：启动时用
+> `PIP_INDEX_URL` / `NPM_CONFIG_REGISTRY` / `CONDA_CHANNELS` / `UV_*` 指定源即可，
+> 会自动固化成 pip.conf / .npmrc / uv.toml / .condarc（含 uv 解释器下载开关）。
+> 见 [SOP §1.4](docs/SOP.md) 与 [DESIGN §36](docs/DESIGN.md)。
+
 ### 本机
 
 ```bash

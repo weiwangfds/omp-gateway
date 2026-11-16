@@ -195,6 +195,10 @@ RUN printf '%s\n' \
       'if [ -f /opt/conda/etc/profile.d/conda.sh ]; then' \
       '  . /opt/conda/etc/profile.d/conda.sh' \
       'fi' \
+      '# 启动脚本固化的镜像源（uv/uvx 只认环境变量，不读 pip.conf）' \
+      'if [ -f "$HOME/.config/omp/env.sh" ]; then' \
+      '  . "$HOME/.config/omp/env.sh"' \
+      'fi' \
       > /etc/profile.d/zz-omp-env.sh
 
 ENV PATH="/opt/conda/bin:/usr/local/bin:/opt/node/bin:${PATH}" \
@@ -211,6 +215,10 @@ COPY --from=builder --chown=1000:1000 /app/gateway/scripts ./scripts
 COPY --from=builder --chown=1000:1000 /app/gateway/package.json ./package.json
 COPY --from=builder --chown=1000:1000 /app/gateway/bunfig.toml ./bunfig.toml
 
+# 启动脚本：把 PIP_INDEX_URL / NPM_CONFIG_REGISTRY / CONDA_CHANNELS 等固化成
+# $HOME 下的 pip.conf、.npmrc、.condarc（会话内 / MCP server 子进程一致生效）
+COPY --chmod=755 docker/omp-entrypoint.sh /usr/local/bin/omp-entrypoint.sh
+
 # 非 root 运行；/workspace 由 compose 以宿主目录挂载（属主可能不同，
 # 因此容器内 uid 固定为 1000，与常见宿主用户一致）
 RUN mkdir -p /workspace \
@@ -224,6 +232,7 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${GATEWAY_PORT}/healthz" > /dev/null || exit 1
 
-# tini 做 PID 1：转发 SIGTERM 给 bun，网关的优雅关停（dispose 全部 live 会话）才能跑完
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# tini 做 PID 1：转发 SIGTERM 给 bun，网关的优雅关停（dispose 全部 live 会话）才能跑完。
+# 启动脚本先固化镜像源再 exec 网关（脚本走 exec，最后仍是单个进程，信号与退出码不受影响）
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/omp-entrypoint.sh"]
 CMD ["bun", "run", "src/index.ts"]
