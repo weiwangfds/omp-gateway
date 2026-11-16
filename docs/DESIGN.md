@@ -1272,7 +1272,7 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
 
 **验证**：`bun run lint` 0 诊断 · `bun run typecheck` 0 error · `bun run test` 296 pass / 0 fail（28 文件）。
 
-## 35. 镜像瘦身（M23/M24）——多阶段构建，3.86GB → 1.79GB
+## 35. 镜像瘦身（M23/M24/M25）——多阶段构建，3.86GB → 1.65GB
 
 ### 35.1 第一轮（M23）：构建期浪费
 
@@ -1315,14 +1315,34 @@ p95 尖峰 = 各用户首次请求的 UserContext 一次性物化，非并发瓶
   剥离后实测：python C 扩展（`_ssl`/`_sqlite3`/`_ctypes`/`_hashlib`）导入正常、`pip install`（网络 + SSL）成功、
   `conda list` 正常、node/npm/bun/uv 版本与执行正常。
 
-### 35.3 结构
+### 35.3 第三轮（M25）：装完就没人执行的残留
+
+这一轮的原则：**只删"没有任何代码路径会执行它"的文件**，凡是会话里可能用到的工具/库一律保留
+（`xgettext`、`sqlite3` CLI、`tkinter`、pip 源编译所需的 `include/` 全部留着）。
+
+| 项 | 体积 | 是什么 | 为什么可以直接删 |
+|---|---:|---|---|
+| `/opt/conda/_conda` | 59MB | Miniconda 安装器自带的 standalone conda（PyInstaller 打包的完整 python+conda 副本） | 不在 conda 的包清单里（安装器残留）；conda 本体不调用它。删后实测 `conda --version` / `conda list` / `conda create -n x --dry-run`（真拉 repodata 求解）全部正常 |
+| `share/info` + `share/locale` | 7.5MB | GNU info 文档、命令行消息翻译 | 前者纯文档；后者在 `LANG=C.UTF-8` 下永不命中（只影响多语言提示） |
+| `idlelib` | 4MB | IDLE 图形编辑器 | 容器内无显示，本来就不可能运行 |
+| `lib-dynload/_test*`、`xxlimited*`、`pcre2test`、`nghttpx` | 4.3MB | CPython 自测扩展、pcre2 测试程序、nghttp2 演示代理 | 对应的库本体都保留，删掉的只是测试/演示可执行体 |
+| `site-packages/**/tests` | 2.5MB | 各 Python 包的测试套件 | 运行期不会被 import |
+
+**结果：1.79GB → 1.65GB（再 -8%）**；累计 **3.86GB → 1.65GB（-57%）**。压缩拉取 494MB → 430MB，
+解压后 1.3GB → 1.2GB。
+
+**另一条已经确认"不能动"的**：`pi-natives` 的 modern/baseline 两份 `.node` 是 **AVX2 / 非 AVX2 的 CPU 变体**，
+不是平台变体。删掉 baseline 不会"变慢"——native 加载失败时 `native/index.js` 走 `missingNativeClass()`，
+PTY / shell / 高亮会直接不可用。要保住"任何 x86-64 Linux 主机都能跑"，这 124MB 必须留。
+
+### 35.4 结构
 
 ```
 base (debian:trixie-slim)  ──┬─→ builder：全量依赖 → typecheck → 生产依赖 + 剔除 → strip node
    + Miniconda（同层 strip）  └─→ runtime：bun/node 二进制 + conda + uv + 生产依赖（COPY --chown）+ src
 ```
 
-### 35.4 两条 overlayfs 铁律（本轮踩到的坑）
+### 35.5 两条 overlayfs 铁律（本轮踩到的坑）
 
 1. **whiteout 不减体积**：在被删文件所在层之后的层里 `rm`，只往文件系统加 whiteout，字节仍留在下层。
    所以"剔除"必须与"创建"同层（或在更早的层）。
@@ -1332,19 +1352,19 @@ base (debian:trixie-slim)  ──┬─→ builder：全量依赖 → typecheck 
 
 结论：凡是"装完再改"的优化，都必须塞进创建该文件的那一个 `RUN` 里。
 
-### 35.5 验证
+### 35.6 验证
 
 - 容器验收 **15/15**（健康/会话/注入/bootstrap/文件读写/openapi/导出导入往返）
 - **真实模型会话**：prompt 202 → `bash` 工具真实调用 → `turn.completed` → 回复 `omp-ok`
 - **镜像内跑完整测试套件**：`255 pass / 41 skip / 0 fail`（296 项，28 文件）——41 项是需要真实模型凭据的 e2e，自动跳过
 - 四套运行时在登录 shell 下均可达：python 3.14.7 / conda 26.7.1 / pip 26.2.1 / uv 0.13.8 / uvx / node 22.14.0 / npm 10.9.2 / bun 1.4.4 / git 2.47.3
 
-### 35.6 剩余体积的构成（1.79GB）与"故意不动"的清单
+### 35.7 剩余体积的构成（1.65GB）与"故意不动"的清单
 
 | 项 | 体积 | 为什么不动 |
 |---|---:|---|
 | pi-natives-linux-x64 的 modern + baseline 两份 `.node` | 248MB | 两份都已无符号可剥（text 75MB + rodata 31MB/份）。loader 按 AVX2 选 `modern`，并在 `TypeNotFound` 等场景回退 `baseline`（`loader-state.js`）——删 baseline = 老 CPU/异常主机直接不可用 |
-| conda（python 3.14 + conda/pip/rattler/libmamba） | ~407MB | 要求保留 `conda` 命令语义；换 micromamba 会改命令面 |
+| conda（python 3.14 + conda/pip/rattler/libmamba） | ~333MB | 要求保留 `conda` 命令语义；换 micromamba 会改命令面 |
 | node 22 + npm | 117MB | npm 生态 MCP server 需要（`npx`） |
 | bun | 107MB | 网关运行时 |
 | uv / uvx | 38MB | Python 侧包管理 |

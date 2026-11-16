@@ -48,7 +48,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 同一文件会在两层各存一份（strip 会因此让镜像反而变大）。所以所有"改文件"的动作
 # 必须与"创建文件"同层。
 #   清理：*.a 静态库、*.js.map、包缓存（/opt/conda/pkgs）、纯文档（gettext/pcre2 的
-#         share/doc 就有 15MB）
+#         share/doc 就有 15MB）、以及下面这些"装完就没人执行"的东西：
+#           _conda             Miniconda 安装器自带的 standalone conda（PyInstaller 打包的
+#                              完整 python+conda 副本，59MB），不在 conda 的包清单里；
+#                              conda 本体不调用它（已实测 version/list/create --dry-run 全正常）
+#           share/info         GNU info 文档
+#           share/locale       命令行消息翻译（LANG=C.UTF-8 下永不命中）
+#           idlelib            IDLE 图形编辑器（容器内无显示，不可能运行）
+#           lib-dynload/_test* CPython 自身的测试扩展模块
+#           pcre2test/nghttpx  pcre2 的测试程序、nghttp2 的演示代理（库本体保留）
+#           site-packages/**/tests 各包的测试套件（运行期不会被 import）
 #   剥离：conda 的二进制/共享库是带 -g 构建的，DWARF + 符号表约 100MB
 #         （libpython、python 本体各 28MB，libstdc++ 12MB …），运行期完全用不到——
 #         动态链接器只查 .dynsym，strip 不会动它。binutils 同层装完即卸。
@@ -68,6 +77,14 @@ RUN set -eux; \
     find /opt/conda -follow -type f -name '*.js.map' -delete; \
     /opt/conda/bin/conda clean -afy; \
     find /opt/conda/share/doc /opt/conda/share/man -mindepth 1 -delete; \
+    rm -f /opt/conda/_conda; \
+    rm -rf /opt/conda/share/info /opt/conda/share/locale /opt/conda/lib/python3.14/idlelib; \
+    rm -f /opt/conda/lib/python3.14/lib-dynload/_test*.so \
+          /opt/conda/lib/python3.14/lib-dynload/xxlimited*.so \
+          /opt/conda/lib/python3.14/lib-dynload/_ctypes_test*.so \
+          /opt/conda/bin/pcre2test /opt/conda/bin/nghttpx; \
+    find /opt/conda/lib/python3.14/site-packages -maxdepth 3 -type d \
+        \( -name test -o -name tests \) -prune -exec rm -rf {} +; \
     find /opt/conda -type f \( -name '*.so' -o -name '*.so.*' \) \
         -exec strip --strip-unneeded {} + 2>/dev/null || true; \
     find /opt/conda/bin -maxdepth 1 -type f \
