@@ -9,6 +9,8 @@ import { cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import type { UserContext } from "./user-context.ts";
 import { globalExtensionsDir, globalSkillsDir, userExtensionsDir } from "./paths.ts";
 import { composeMcpForWorkspace } from "./mcp-compose.ts";
+import { composeAgentsForWorkspace } from "./agent-compose.ts";
+import { composeKbForWorkspace } from "./kb/compose.ts";
 import { buildHttpCustomTools } from "./http-tools.ts";
 import { registerHookSession } from "./hook-engine.ts";
 import type { SessionCtx } from "./session-registry.ts";
@@ -17,7 +19,7 @@ import type { SessionCtx } from "./session-registry.ts";
 
 /**
  * 装配顺序：
- *   1. prepareWorkspace    — 1:1 workspace + 可选拷贝（fork）+ MCP 三方合成
+ *   1. prepareWorkspace    — 1:1 workspace + 可选拷贝（fork）+ MCP/agents/KB/settings 合成
  *   2. resolveSessionModel — 显式模型解析（不存在即 ModelNotFoundError）
  *   3. loadExtensionLayers — 全局/用户扩展、作用域技能、HTTP 工具
  *   4. loadUserContextFiles— 用户级 AGENTS/RULES/APPEND_SYSTEM 注入
@@ -46,7 +48,46 @@ export async function prepareWorkspace(userId: string, sid: string, copyWorkspac
     }
   }
   await composeMcpForWorkspace(userId, workspaceDir);
+  await composeAgentsForWorkspace(userId, workspaceDir);
+  // KB junction 合成（DESIGN §38.5）：语料/脚本在工作区文件可达（skill 本体经 options.skills 注入）
+  await composeKbForWorkspace(workspaceDir);
+  await composeSessionSettingsForWorkspace(workspaceDir);
   return workspaceDir;
+}
+
+/**
+ * 会话级 omp settings 合成（部署方工具面收敛，DESIGN §41.7）：OMP_SESSION_SETTINGS_JSON
+ * （部署方 env，JSON 对象，键为 omp 设置 id）→ <workspace>/.omp/settings.json。SDK 以会话
+ * cwd（= workspaceDir）解析 project 层设置，内网部署可借此关闭联网类工具，如
+ * {"fetch.enabled":false,"web_search.enabled":false,"browser.enabled":false,"computer.enabled":false}。
+ * 语义：env 未设 = 不写（保持 omp 默认，本地开发不受影响）；键浅合并覆盖已存在文件
+ * （fork 拷贝来源若带 settings，部署方键优先）；坏 JSON 只告警不阻塞建会话（fail-open）。
+ */
+export async function composeSessionSettingsForWorkspace(workspaceDir: string): Promise<void> {
+  const raw = process.env.OMP_SESSION_SETTINGS_JSON?.trim();
+  if (!raw) return;
+  let deployment: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not a JSON object");
+    deployment = parsed as Record<string, unknown>;
+  } catch (err) {
+    console.error(`[gateway] OMP_SESSION_SETTINGS_JSON 无效（跳过 settings 合成）: ${String(err)}`);
+    return;
+  }
+  const file = path.join(workspaceDir, ".omp", "settings.json");
+  let merged: Record<string, unknown> = { ...deployment };
+  try {
+    const prev = JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+    if (prev && typeof prev === "object" && !Array.isArray(prev)) merged = { ...prev, ...deployment };
+  } catch {
+    // 无既有文件或坏 JSON：直接用部署方键（坏 JSON 一并修正，可预期）
+  }
+  const next = `${JSON.stringify(merged, null, 2)}\n`;
+  const prevRaw = await fs.readFile(file, "utf8").catch(() => null);
+  if (prevRaw === next) return; // 内容一致不落盘（fork 拷贝可能已带来）
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, next, "utf8");
 }
 
 /** 步骤 3：扩展路径 / 作用域技能 / 集成端 HTTP 工具。 */
@@ -108,8 +149,8 @@ async function loadUserContextFiles(agentDir: string): Promise<{
   appendSystemPrompt: string | null;
 }> {
   const contextFiles: Array<{ path: string; content: string }> = [];
-  for (const name of ["AGENTS.md", "RULES.md"]) {
-    const file = path.join(agentDir, name);
+  // 固定文件名直接内联 join（不经变量），信任边界清晰：agentDir 由网关派生，文件名为字面量
+  for (const file of [path.join(agentDir, "AGENTS.md"), path.join(agentDir, "RULES.md")]) {
     const content = await fs.readFile(file, "utf8").catch(() => null);
     if (content?.trim()) contextFiles.push({ path: file, content });
   }

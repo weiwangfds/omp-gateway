@@ -157,9 +157,9 @@ export async function createGatewaySession(opts: CreateSessionOpts): Promise<{
   wireAgentHub(agentRegistry, ctx);
   ctx.snapshotHook = () => {
     // turn 边界自动快照（M4）：每 5 turn / 15min，ring K=20 由 Pruner 滚动
-    void import("./snapshot-service.ts").then(({ maybeAutoSnapshot }) =>
-      maybeAutoSnapshot(opts.userId, opts.sid, ctx.turnCount),
-    );
+    void import("./snapshot-service.ts")
+      .then(({ maybeAutoSnapshot }) => maybeAutoSnapshot(opts.userId, opts.sid, ctx.turnCount))
+      .catch((err) => console.error(`[gateway] auto snapshot failed (${opts.sid}):`, err));
   };
 
   // 8) SDK 事件 → 规范化层

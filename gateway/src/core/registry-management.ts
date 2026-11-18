@@ -33,6 +33,16 @@ export function assertPluginName(name: string): void {
     throw new ManagementError("INVALID_NAME", `plugin name must match ${PLUGIN_NAME_RE.source}`);
 }
 
+/**
+ * KB 管理标记守卫（DESIGN §38.2）：目标目录含 kb.json 即知识库语料（kb-* 前缀是网关托管保留区），
+ * /admin/global/skills 的 CRUD 不得覆盖/删除——抛 ALREADY_EXISTS 由路由层映射。
+ */
+async function assertNotKbDir(skillDir: string): Promise<void> {
+  if (await fs.exists(path.join(skillDir, "kb.json"))) {
+    throw new ManagementError("ALREADY_EXISTS", "directory is managed by KB module (kb.json)");
+  }
+}
+
 export interface ManagedSkill {
   name: string;
   description: string | null;
@@ -68,6 +78,20 @@ export async function listSkillsIn(dir: string): Promise<ManagedSkill[]> {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * 边界守卫的 join：先 resolve 生成目标，再校验目标必须落在受管根内
+ * （target === root 或 target.startsWith(root + path.sep)），否则拒绝——
+ * 白名单（assertSkillName 等）之外的兜底，杜绝越出受管目录。
+ */
+function safeJoin(root: string, ...segments: string[]): string {
+  const base = path.resolve(root);
+  const target = path.resolve(base, ...segments);
+  if (target !== base && !target.startsWith(base + path.sep)) {
+    throw new ManagementError("INVALID_NAME", "path escapes managed directory");
+  }
+  return target;
+}
+
 /** 写入/覆盖 skill（frontmatter name+description + 正文）。 */
 export async function writeSkill(
   dir: string,
@@ -75,31 +99,40 @@ export async function writeSkill(
   body: { description: string; content?: string },
 ): Promise<void> {
   assertSkillName(name);
-  const skillDir = path.join(dir, name);
+  const skillDir = safeJoin(dir, name);
+  await assertNotKbDir(skillDir); // KB 语料保护：含 kb.json 的目录拒绝覆盖
   await fs.mkdir(skillDir, { recursive: true });
   const md = `---\nname: ${name}\ndescription: ${JSON.stringify(body.description.replace(/\n/g, " "))}\n---\n\n${body.content ?? ""}\n`;
-  await fs.writeFile(path.join(skillDir, "SKILL.md"), md, "utf8");
+  await fs.writeFile(safeJoin(skillDir, "SKILL.md"), md, "utf8");
 }
 
 /** 读 SKILL.md 原文；不存在返回 null。 */
 export async function readSkill(dir: string, name: string): Promise<string | null> {
   assertSkillName(name);
   try {
-    return await fs.readFile(path.join(dir, name, "SKILL.md"), "utf8");
+    return await fs.readFile(safeJoin(safeJoin(dir, name), "SKILL.md"), "utf8");
   } catch {
     return null;
   }
 }
 
-/** 删除 skill 目录；不存在返回 false。 */
+/** 删除失败统一出口：不存在 → false（契约语义）；权限/占用等真失败 → 告警但仍 false（此前被静默吞掉）。 */
+function reportDeleteFailure(kind: "skill" | "plugin", name: string, err: unknown): false {
+  if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+  console.warn(`[registry] delete ${kind} failed (${name}):`, err);
+  return false;
+}
+
+/** 删除 skill 目录；不存在返回 false；目录含 kb.json（KB 语料）抛 ManagementError。 */
 export async function deleteSkill(dir: string, name: string): Promise<boolean> {
   assertSkillName(name);
+  const skillDir = safeJoin(dir, name);
+  await assertNotKbDir(skillDir); // 与 writeSkill 同源：KB 语料保护（此前内联重写了一份，必然漂移）
   try {
-    await fs.rm(path.join(dir, name), { recursive: true });
+    await fs.rm(skillDir, { recursive: true });
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-    return false;
+    return reportDeleteFailure("skill", name, err);
   }
 }
 
@@ -145,7 +178,6 @@ export async function deletePlugin(dir: string, name: string): Promise<boolean> 
     await fs.rm(path.join(dir, name));
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-    return false;
+    return reportDeleteFailure("plugin", name, err);
   }
 }

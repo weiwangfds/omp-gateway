@@ -250,7 +250,15 @@ export class SessionCtx {
     for (const sub of this.subscribers) {
       try {
         const ok = sub.send(ev);
-        if (ok instanceof Promise) ok.catch(() => this.subscribers.delete(sub));
+        // 契约：返回 false / 抛错 / promise resolve false 都算写失败 → 移除订阅
+        // （此前 async 订阅者 resolve(false) 既不走 catch 也不走 else，失败连接滞留广播列表反复失败）
+        if (ok instanceof Promise)
+          ok.then(
+            (v) => {
+              if (v === false) this.subscribers.delete(sub);
+            },
+            () => this.subscribers.delete(sub),
+          );
         else if (!ok) this.subscribers.delete(sub);
       } catch {
         this.subscribers.delete(sub);
@@ -272,25 +280,29 @@ export class SessionCtx {
     const approvalId = `ap_${++this.approvalSeq}_${Date.now().toString(36)}`;
     audit("approval.requested", "approval", approvalId, this.userId, { sessionId: this.sid, tool });
     // 集成端钩子通知（DESIGN §23）：审批请求/决议均可回调业务系统
-    void import("../hook-engine.ts").then(({ notifyIntegrationHooks }) =>
-      notifyIntegrationHooks(this.ompSessionId, "tool_approval_requested", {
-        approvalId,
-        tool,
-        args,
-        timeoutSec: Math.round(timeoutMs / 1000),
-      }),
-    );
+    void import("../hook-engine.ts")
+      .then(({ notifyIntegrationHooks }) =>
+        notifyIntegrationHooks(this.ompSessionId, "tool_approval_requested", {
+          approvalId,
+          tool,
+          args,
+          timeoutSec: Math.round(timeoutMs / 1000),
+        }),
+      )
+      .catch((err) => console.error(`[gateway] approval hook dispatch failed (${this.sid}):`, err));
     return new Promise((resolve) => {
       const settle = (d: { approved: boolean; reason?: string }) => {
         if (!this.pendingApprovals.delete(approvalId)) return;
         clearTimeout(timer);
-        void import("../hook-engine.ts").then(({ notifyIntegrationHooks }) =>
-          notifyIntegrationHooks(this.ompSessionId, "tool_approval_resolved", {
-            approvalId,
-            approved: d.approved,
-            reason: d.reason,
-          }),
-        );
+        void import("../hook-engine.ts")
+          .then(({ notifyIntegrationHooks }) =>
+            notifyIntegrationHooks(this.ompSessionId, "tool_approval_resolved", {
+              approvalId,
+              approved: d.approved,
+              reason: d.reason,
+            }),
+          )
+          .catch((err) => console.error(`[gateway] approval hook dispatch failed (${this.sid}):`, err));
         resolve(d);
       };
       const timer = setTimeout(
