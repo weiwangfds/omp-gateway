@@ -58,6 +58,20 @@ check(
   Object.values(spec.paths).every((m) => Object.values(m).every((op) => op.summary && op.summary.length >= 4)),
 );
 
+// 6.5) 管理面新模块路由（KB / Wren）：容器内已挂载、X-Admin-Id 门禁放行
+const AH = { ...H, "x-admin-id": "docker-smoke" };
+const kbList = await fetch(`${BASE}/admin/kb`, { headers: AH });
+const kbBody = await kbList.json().catch(() => null);
+check(
+  "GET /admin/kb → 200（KB 模块挂载）",
+  kbList.status === 200 && Array.isArray(kbBody?.kbs),
+  `status=${kbList.status}`,
+);
+const wrenList = await fetch(`${BASE}/admin/wren/datasources`, { headers: AH });
+check("GET /admin/wren/datasources → 200（Wren 模块挂载）", wrenList.status === 200, `status=${wrenList.status}`);
+const kbNoAdmin = await fetch(`${BASE}/admin/kb`, { headers: H });
+check("GET /admin/kb 无 X-Admin-Id → 403（门禁生效）", kbNoAdmin.status === 403, `status=${kbNoAdmin.status}`);
+
 // 7) 环境导出（bundle 落在挂载卷的 exports 目录）
 const exp = await fetch(`${BASE}/internal/maintenance/export`, { method: "POST", headers: H });
 const expBody = await exp.json();

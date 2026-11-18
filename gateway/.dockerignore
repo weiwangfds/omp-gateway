@@ -8,3 +8,7 @@ data
 .DS_Store
 coverage
 *.tsbuildinfo
+__pycache__
+*.pyc
+# 安全扫描产物（Mimosa）：只属于宿主机工作区，不进构建上下文
+.mimosa

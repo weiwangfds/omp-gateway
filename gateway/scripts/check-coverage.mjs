@@ -16,7 +16,12 @@ for (let i = 0; i < 60; i++) {
   } catch {}
   await new Promise((r) => setTimeout(r, 300));
 }
-const spec = await (await fetch(`${base}/openapi.json`)).json();
+let spec;
+try {
+  spec = await (await fetch(`${base}/openapi.json`)).json();
+} finally {
+  proc.kill(); // fetch 抛错也要清理子进程
+}
 const missing = [];
 for (const [p, methods] of Object.entries(spec.paths)) {
   for (const [m, op] of Object.entries(methods)) {
@@ -26,5 +31,6 @@ for (const [p, methods] of Object.entries(spec.paths)) {
 }
 console.log("coverage:", JSON.stringify(spec["x-gateway-coverage"]));
 console.log("missing summaries:", missing.length);
-for (const k of missing) console.log("  ", k);
-proc.kill();
+for (const k of missing) console.log("   ", k);
+// 门禁语义：有缺失必须非零退出（此前永远 exit 0，CI 拦不住契约漂移）
+if (missing.length > 0) process.exitCode = 1;

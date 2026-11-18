@@ -7,17 +7,43 @@
 # 用法：
 #   WORKSPACE_ROOT=/srv/omp-workspace docker compose up -d
 #   docker compose logs -f gateway
+# 变量来源：仓库根目录 .env（模板见 gateway/.env.example）或命令行环境变量；
+# MinIO 不在本编排内（部署侧服务器直接部署包），KB 出图/取图经 .env 双地址对接。
 
 services:
   gateway:
     build:
       context: ./gateway
       dockerfile: Dockerfile
+      args:
+        # 镜像构建期 pip 镜像源（烘 pymupdf/minio/wrenai 进 conda base）；
+        # 内网构建必传，公网构建可留空。与运行期注入共用同一变量（双角色，见 .env.example）
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+        # 构建期 npm 源（qmd 安装用）：优先 NPM_REGISTRY，未设则回退运行期的
+        # NPM_CONFIG_REGISTRY——与 PIP_INDEX_URL 一样一个变量管构建 + 运行两端
+        NPM_REGISTRY: "${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-}}"
+        # Wren 数据源驱动裁剪（默认 mcp,postgres,clickhouse；只查 PG 可改 mcp,postgres）
+        WREN_EXTRAS: "${WREN_EXTRAS:-mcp,postgres,clickhouse}"
+        # =1 裁掉 qmd 的 cuda/vulkan/arm* 预编译与 tree-sitter 语法（实测 qmd 层 907→156MB，代价见 Dockerfile）
+        QMD_SLIM: "${QMD_SLIM:-}"
     image: omp-gateway:latest
     container_name: omp-gateway
     restart: unless-stopped
+    # 日志上限：网关含 SSE/审计高频输出，json-file 无上限长期运行会吃满宿主磁盘
+    # （250MB 封顶；调大改这里，不在 Dockerfile）
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # 会话内无需提权（agent 以 uid 1000 装包/跑 MCP，无 setuid 依赖）——
+    # 即使网关进程被攻破也无法 su/sudo 提权
+    security_opt:
+      - no-new-privileges
     ports:
-      - "${GATEWAY_PORT:-8787}:8787"
+      # GATEWAY_BIND 可选："127.0.0.1" 只绑回环（上游与网关同机时收紧暴露面）；
+      # 缺省绑所有网卡（跨机上游）
+      - "${GATEWAY_BIND:-}${GATEWAY_BIND:+:}${GATEWAY_PORT:-8787}:8787"
     environment:
       # 上游注入的服务 token（必填；上游与网关共用同一份）
       GATEWAY_SERVICE_TOKENS: "${GATEWAY_SERVICE_TOKENS:?set GATEWAY_SERVICE_TOKENS in .env}"
@@ -31,6 +57,15 @@ services:
       GATEWAY_MAX_GLOBAL_STREAMING: "${GATEWAY_MAX_GLOBAL_STREAMING:-50}"
       # 回调目标白名单（SSRF 收紧；留空=内网放行）
       GATEWAY_WEBHOOK_HOSTS_ALLOWLIST: "${GATEWAY_WEBHOOK_HOSTS_ALLOWLIST:-}"
+      # ── 调优透传（可选；留空走代码内置值，语义见 .env.example）────────────────
+      GATEWAY_SESSION_IDLE_TTL_MS: "${GATEWAY_SESSION_IDLE_TTL_MS:-}"
+      GATEWAY_STREAM_QUEUE_TIMEOUT_MS: "${GATEWAY_STREAM_QUEUE_TIMEOUT_MS:-}"
+      GATEWAY_STREAM_MAX_HOLD_MS: "${GATEWAY_STREAM_MAX_HOLD_MS:-}"
+      GATEWAY_OTEL: "${GATEWAY_OTEL:-}"
+      GATEWAY_CORS_ORIGINS: "${GATEWAY_CORS_ORIGINS:-}"
+      # OTEL 上报目标（GATEWAY_OTEL=1 时才生效；SDK 读标准 OTEL_* 变量，compose 需显式透传）
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_HEADERS: "${OTEL_EXPORTER_OTLP_HEADERS:-}"
       # 定时备份目录（VACUUM INTO 一致快照）
       GATEWAY_BACKUP_DIR: /workspace/.omp-gateway/backups
       GATEWAY_BACKUP_INTERVAL_MIN: "${GATEWAY_BACKUP_INTERVAL_MIN:-60}"
@@ -54,19 +89,102 @@ services:
       PIP_CERT: "${PIP_CERT:-}"
       # 容器内新建文件的 umask（默认 0000 → 666/777，宿主机可写；收紧用 0027）
       OMP_UMASK: "${OMP_UMASK:-}"
+      # ── 会话工具面收敛（DESIGN §41.7；内网无 GUI 部署建议关闭联网类工具）──────
+      # JSON 对象 → 每个会话 workspace 的 .omp/settings.json（omp project 层设置）。
+      # 内网示例（.env.example 有完整说明）：
+      #   OMP_SESSION_SETTINGS_JSON={"fetch.enabled":false,"web_search.enabled":false,"browser.enabled":false,"computer.enabled":false}
+      # 留空 = 不写 settings（omp 默认行为，本地开发不受影响）
+      OMP_SESSION_SETTINGS_JSON: "${OMP_SESSION_SETTINGS_JSON:-}"
+      # ── git 本地面（DESIGN §41.8；会话内本地版本管理，无远端要求）────────────
+      # 默认身份（缺省 omp-session <omp-session@localhost>）与 safe.directory 通配
+      # （bind mount 属主 uid 不一致时 git 不再报 dubious ownership；=0 关闭放行）
+      GIT_USER_NAME: "${GIT_USER_NAME:-}"
+      GIT_USER_EMAIL: "${GIT_USER_EMAIL:-}"
+      GIT_SAFE_DIRECTORY: "${GIT_SAFE_DIRECTORY:-}"
+      # ── 知识库（KB）模块（可选，DESIGN §38.8；脚本 kb_shot/kb_asset 直读）─────
+      # 双地址机制：上传走 KB_MINIO_ENDPOINT（部署内网可达的写入端点——MinIO 由部署侧
+      # 在服务器上直接部署包），输出 URL 拼 KB_MINIO_ENDPOINT_PUBLIC（外网可达基址，
+      # 报告里贴的就是它）；PUBLIC 未配置时 URL 回落内网端点（外网打不开）。
+      # 都未配置 → 本地 assets/ 模式。
+      KB_MINIO_ENDPOINT: "${KB_MINIO_ENDPOINT:-}"
+      KB_MINIO_ENDPOINT_PUBLIC: "${KB_MINIO_ENDPOINT_PUBLIC:-}"
+      KB_MINIO_ACCESS_KEY: "${KB_MINIO_ACCESS_KEY:-}"
+      KB_MINIO_SECRET_KEY: "${KB_MINIO_SECRET_KEY:-}"
+      KB_MINIO_BUCKET: "${KB_MINIO_BUCKET:-}"
+      KB_MINIO_SECURE: "${KB_MINIO_SECURE:-}"
+      KB_UPLOAD_MAX_MB: "${KB_UPLOAD_MAX_MB:-}"
+      KB_SKILL_PY_DEPS: "${KB_SKILL_PY_DEPS:-}"
+      # ── qmd 检索引擎（KB 模块可选增强）──────────────────────────────────────
+      # qmd 可执行文件（默认 qmd；镜像内已 bun 全局安装并打过 provider patch）
+      KB_QMD_BIN: "${KB_QMD_BIN:-}"
+      # qmd 命名索引（默认 kb；网关把每个 KB 语料注册为其中的 kb-<slug> collection）
+      KB_QMD_INDEX: "${KB_QMD_INDEX:-}"
+      # =1 时 entrypoint 起 qmd MCP HTTP daemon（127.0.0.1:8181/mcp，同容器环回服务），
+      # 网关启动把该地址写进 global/mcp.json → 会话获得 qmd 检索工具
+      KB_QMD_MCP: "${KB_QMD_MCP:-}"
+      # 远端 embedding 三件套（OpenAI 兼容，如火山方舟 doubao）：三件齐才跑 qmd embed
+      # （语义检索）；不配 = 只 update（BM25 即刻可用），不会触发本地 GGUF 模型下载
+      KB_QMD_EMBED_BASE_URL: "${KB_QMD_EMBED_BASE_URL:-}"
+      KB_QMD_EMBED_API_KEY: "${KB_QMD_EMBED_API_KEY:-}"
+      KB_QMD_EMBED_MODEL: "${KB_QMD_EMBED_MODEL:-}"
+      # embed 每批文档数（默认 16，直通 qmd）
+      KB_QMD_EMBED_BATCH: "${KB_QMD_EMBED_BATCH:-}"
+      # qmd 配置与缓存的容器级落点（挂载卷内）：collection 配置、索引/模型缓存、daemon PID
+      # 都随卷迁移（换机整目录搬移）。XDG_CACHE_HOME 是容器级 env，qmd 之外遵循 XDG 的
+      # 工具（uv 等）缓存也会改到此处——有意为之，换取状态全部随卷走。
+      QMD_CONFIG_DIR: /workspace/.omp-gateway/global/kb/qmd/config
+      XDG_CACHE_HOME: /workspace/.omp-gateway/global/kb/qmd/cache
+      # ── WrenAI 语义层（可选增强，自然语言查 ClickHouse/PostgreSQL）──────────
+      # 网关启动时按 WREN_DATASOURCES 为每个数据源自建 Wren 项目 + wren serve mcp
+      # HTTP daemon（127.0.0.1 环回）+ 注册 global/mcp.json + 物化 data-query skill。
+      # =1 开启；镜像内已烘 wrenai[mcp,postgres,clickhouse]（wren 命令在 PATH）。
+      WREN_MCP: "${WREN_MCP:-}"
+      # wren 配置根（profiles.yml / daemon 日志落点）：容器级 env——会话 shell 继承后，
+      # 会话内 `wren --sql` 与 daemon 解析同一份 profiles；落在挂载卷内随卷迁移
+      WREN_HOME: /workspace/.omp-gateway/wren
+      # 数据源名清单（逗号分隔，^[a-z][a-z0-9-]{0,15}$），如 pg,ch
+      WREN_DATASOURCES: "${WREN_DATASOURCES:-}"
+      # 连接总 JSON（形如 {"pg":{"datasource":"postgres",...},"ch":{"datasource":"clickhouse",...}}）：
+      # gateway 按 WREN_DATASOURCES 的名字取键；字段以 `wren docs connection-info <type>` 为准。
+      # 用单一变量而非动态拼名的多个变量（compose 不支持变量名拼接）；含密码，勿提交进仓库
+      WREN_DS_CONNECTIONS: "${WREN_DS_CONNECTIONS:-}"
+      # MCP daemon 端口基址（默认 8081；创建时从 base 向上找第一个空闲端口，注册表稳定复用）
+      WREN_MCP_PORT_BASE: "${WREN_MCP_PORT_BASE:-}"
+      # wren 可执行文件覆盖（默认 PATH 查找 wren；一般无需设置）
+      WREN_BIN: "${WREN_BIN:-}"
+      # 无人值守 schema 同步间隔（分钟；默认 1440=24h；0=关闭；DESIGN §39.2.2）
+      WREN_AUTO_SYNC_MIN: "${WREN_AUTO_SYNC_MIN:-}"
     volumes:
       # 工作区根目录对外挂载：宿主机可见、可直接编辑会话产出
       - "${WORKSPACE_ROOT:-./workspace}:/workspace"
-      # conda 环境（网关与 MCP server 共用；如需固定版本可改为具名卷）
-      # - omp-conda:/opt/conda/envs/omp
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
+      # 网关数据根（gateway.db 等私有状态）。必须单独挂一层：它是下面 global 层的父层，
+      # 若自身不是挂载点，Docker 会在 workspace 卷里自动创建它（root:755），
+      # 容器内 uid 1000 写不了 gateway.db（SQLITE_CANTOPEN，实测踩到）。
+      - "${GATEWAY_DATA_ROOT_HOST:-./gateway-data}:/workspace/.omp-gateway"
+      # ── 全局资源层（DESIGN §38.2 / §39）：global 整层单独挂载，宿主 ./global/ 可见 ──
+      # 这一层是**所有会话可见的全局资源**，不只是知识库：
+      #   global/skills/kb-<slug>/      知识库 skill（语料 + SKILL.md + scripts/references）
+      #   global/skills/data-query/     数据查询 skill（WrenAI 工作流）
+      #   global/kb/<slug>.db           知识库元数据库（+WAL）
+      #   global/kb/qmd/{config,cache}  qmd 索引与配置
+      #   global/wren/<name>/           Wren 项目 + MDL（数据查询语义层）
+      #   global/mcp.json               全局 MCP 注册（qmd / wren-<name>）
+      #   global/agents/、extensions/   全局 agent 定义与扩展
+      # 备份 = 打包整个 ./global（知识库部分 = skills/kb-* + kb/）。
+      # 只挂这一层（而不是再往下挂 skills/ 与 kb/ 两个子目录）：Docker 为子挂载创建的
+      # 父层属主是宿主 root、权限 755，容器内 uid 1000 无法写入也无法 chmod，网关会在
+      # ensureGlobalScaffold 处失败（实测踩到）。
+      - "${GLOBAL_ROOT:-./global}:/workspace/.omp-gateway/global"
+      # 说明：Docker 自动创建的空挂载源目录属主是宿主 root(755)，容器内可能写不进去
+      # ——entrypoint 会逐层 chmod 0777（bind mount 同步改宿主）并在不可写时告警；
+      # 也可在宿主机预创建这几个目录并 chmod 777。
+    # 健康检查内置于镜像（Dockerfile HEALTHCHECK → /healthz，30s/5s/3 次，start 20s）：
+    # 这里不再重复声明——两处各写一份必然漂移；要调整参数请改 Dockerfile。
     stop_grace_period: 30s # 让优雅关停跑完（dispose live 会话）
 
-# volumes:
-#   omp-conda:
-#     name: omp-conda
+  # ── MinIO（KB 出图/取图，DESIGN §38.8）────────────────────────────────────
+  # 本编排不含 MinIO 容器——部署侧在服务器上直接部署 MinIO 包/二进制。
+  # 容器内脚本经 .env 的双地址对接（缺一会在启动日志提示）：
+  #   KB_MINIO_ENDPOINT=<内网上传端点，如 10.0.0.5:9000>
+  #   KB_MINIO_ENDPOINT_PUBLIC=<外网 URL 基址，如 https://assets.example.com>
+  # 都不配 → 脚本回退本地 assets/ 模式（能力可用，只是没有公网 URL）。
