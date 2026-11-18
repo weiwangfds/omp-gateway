@@ -145,7 +145,7 @@ POST   /api/sessions/:sid/snapshots/:id/restore {mode:"fork"|"rollback"}   # for
 # 用户资源与全局管理（完整清单以 /openapi.json 为权威）
 GET/PUT /api/me/models/config · POST /api/me/models/credentials · POST /api/me/models/test · GET /api/me/projects
 GET/PUT /api/me/mcp · GET/PUT/DELETE /api/me/skills/:name · GET/PUT/DELETE /api/me/plugins/:name
-GET/POST /admin/global/{mcp,skills,plugins}（X-Admin-Id 标识，DESIGN §18）
+GET/POST /admin/global/{mcp,skills,plugins,agents}（X-Admin-Id 标识，DESIGN §18）
 
 # 内部契约（仅上游）
 POST   /internal/users/:uid/provision · GET /internal/users/:uid/summary
@@ -176,6 +176,7 @@ src/
 │   ├── session-factory.ts # ★ createAgentSession 参数组装（隔离落点）
 │   ├── snapshot-service.ts# 物化/forkFrom/rollback/Pruner
 │   ├── mcp-compose.ts     # 三方合并 project>user>global
+│   ├── agent-compose.ts    # 全局 agents 合成进 workspace .omp/agents（manifest 记账）
 │   └── events.ts          # gateway-events v1 规范化
 ├── routes/{sessions,snapshots,models,extensions,internal,ops}.ts
 ├── jobs/{idle-culler,trash-purger,snapshot-pruner}.ts
@@ -380,16 +381,17 @@ VS Code 式文件管理 + git 基础，挂在 `/api/sessions/:sid/*`，作用于
 
 **权限模型（拍板）**：网关自身**没有权限体系，只有用户标识**。权限由上级（上游系统）管理：
 - 用户级管理：`/api/me/skills|plugins|mcp` 等——上游代用户调用（svc-token + X-User-Id），网关只做归属与净化。
-- 全局级管理：`/admin/global/{mcp,skills,plugins}`——上游注入 **`X-Admin-Id` 标识**（内网 svc-token 通道内可信），网关校验"标识存在且格式合法"，**actor 记入审计**（谁在管理由上游负责）。无独立 admin token 体系。
+- 全局级管理：`/admin/global/{mcp,skills,plugins,agents}`——上游注入 **`X-Admin-Id` 标识**（内网 svc-token 通道内可信），网关校验"标识存在且格式合法"，**actor 记入审计**（谁在管理由上游负责）。无独立 admin token 体系。
 - 分享令牌（view/control）天然无管理权（requireFullAuth 拒绝 me/admin 面）。
 
 **管理 API**：
 - skills：`GET /me/skills`（双作用域清单，scope 标签）、`GET/PUT/DELETE /me/skills/:name`；全局侧 `/admin/global/skills[/:name]` 同形。
 - plugins：`GET /me/plugins`（双作用域）、`PUT/DELETE /me/plugins/:name`（.ts/.js 源码，≤2MB）；全局侧同形。
 - mcp：`GET/PUT /me/mcp`（用户 mcp.json）；全局侧 `GET/PUT /admin/global/mcp`。
+- agents：`GET /api/me/agents`（双作用域清单，scope 标签；用户 agentDir/agents + 全局 global/agents）；全局侧 `GET/PUT/DELETE /admin/global/agents/:name`（与用户级同构的双通道校验，config-codec agents 白名单）。全局定义经 **agent-compose**（core/agent-compose.ts）在会话创建时合成进 workspace `.omp/agents/`（manifest `.gateway-composed.json` 记账：fork 重算刷新/清理；目录含非网关 .md 视为自管不碰；用户 agentDir 同名跳过合成 = 借 project>user 优先级实现用户覆盖全局）。对新会话生效。
 - 命名净化：skill `^[a-z0-9][a-z0-9-]{0,63}$`、plugin `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(ts|js)$`（400 INVALID_NAME）。
 - **变更生效语义**：skill/extension/MCP 均在**会话创建时加载**——变更对新会话生效，活跃会话保留原状（契约写明）。
-- 实测：管理 CRUD × 两级 × 跨用户可见性 × 同名用户覆盖全局 × admin 鉴权（缺失/错误 403）× 新会话加载/删除消失（integration-scoping.test.ts，10 用例）。
+- 实测：管理 CRUD × 两级 × 跨用户可见性 × 同名用户覆盖全局 × admin 鉴权（缺失/错误 403）× 新会话加载/删除消失（integration-scoping.test.ts，11 用例，含全局 agent 合成/覆盖/清理，SDK discoverAgents 验证）+ agent-compose 单元 5 用例。
 
 ## 19. 审批流（M6，已实现）
 
@@ -492,7 +494,7 @@ VS Code 式文件管理 + git 基础，挂在 `/api/sessions/:sid/*`，作用于
 4. **审批 UI 流**：`tool.confirm_required {approvalId, args.full}` → 卡片展示 full 文本 +
    approve/deny → `POST /:sid/approvals/:id` → SSE 观察工具真实执行/拒绝理由；超时倒计时
    用 `timeoutSec`。
-5. **管理面**：全局层 `/admin/global/{skills,plugins,mcp}` CRUD 页 + `X-Admin-Id` 透传；
+5. **管理面**：全局层 `/admin/global/{skills,plugins,mcp,agents}` CRUD 页 + `X-Admin-Id` 透传；
    用户层 `/api/me/*` 同构复用。
 6. **文件/git 面板**：`tree/file/raw/upload/index` + `git status/log/diff/branches/commit/
    worktrees`（端点已齐，纯前端工作量）。
@@ -1455,3 +1457,750 @@ bind mount 的两端是同一个 inode，所以容器内 `chmod 0777 /workspace`
 
 也就是说：**777 让宿主机与容器共享一棵目录的内容，不让容器越出这棵目录**。要进一步收紧，
 把 `WORKSPACE_ROOT` 挂到更小的子目录即可（只有那棵子树是共享面）。
+
+## 38. 知识库（KB）模块（M28）——管理面进网关，查询走 omp 原生
+
+> 抽象自 la-sequence-script 的 Python 知识库服务（FastAPI + SQLite + LanceDB + MCP）。
+> 目标态：管理面（上传/文档树/删除）进网关 Bun 进程；查询不建任何检索服务——语料放全局
+> skill 目录，agent 原生 grep/read；向量路（LanceDB/embedding/hybrid 融合）整体取消；
+> 截图/取图/MinIO 由 skill 自带 Python 脚本承担，网关零 PDF 渲染、零 minio SDK。
+
+### 38.1 上游契约：MinerU ParseOutcome zip（一包一文档）
+
+上传物是 `mineru.parser.task_outputs.build_task_output` 的 default 档位产物：
+
+| 文件 | 内容 | 入库处置 |
+|---|---|---|
+| `markdown.md` | 全文 Markdown，图片以 `images/` 相对路径引用 | 改名 `<文档名>.md`，即检索语料本体 |
+| `middle_json.json` | 结构化中间结果（表格 HTML、block 树、页码、bbox） | 透传保留，`kb_shot.py` 的 bbox 来源 |
+| `structured_content.json` | 面向 RAG 的结构化内容 | 透传保留（本模块不消费） |
+| `images/page_N_table_M.jpg`、`page_N_image_M.jpg` | MinerU 已裁剪的表/插图 | 透传保留，**取图已经由 MinerU 完成** |
+
+原始 PDF 不在 zip 里，走独立补传接口（§38.4）；`source.pdf` 缺位只影响截图能力，不影响查询。
+docx/html/latex 档位不在本模块范围内（只用 default 档位）。
+
+### 38.2 目录布局（全部在 dataRoot 内）
+
+```
+data/global/skills/kb-<slug>/        # 全局 skill，新会话即时可发现
+  SKILL.md                           # 网关生成：查询策略 + 脚本用法（§38.9）
+  kb.json                            # {_managedBy:"omp-gateway", type:"kb"} 管理标记
+  docs/<doc>/
+    <doc>.md                         # 语料本体；images/ 相对引用原样有效
+    images/*.jpg                     # MinerU 裁剪图
+    middle_json.json                 # 截图脚本的 bbox 来源
+    structured_content.json          # 透传保留
+    source.pdf                       # 可选（补传接口写入）
+  scripts/kb_shot.py                 # 截图（pymupdf，§38.7）
+  scripts/kb_asset.py                # 取图/资产上传 MinIO（§38.7）
+  assets/                            # MinIO 未配置时脚本的本地输出目录
+data/global/kb/<slug>.db             # bun:sqlite 元数据（§38.3）
+```
+
+- KB 数据全部落在 dataRoot 内 → §32.2 的迁移 bundle（= 整套 dataRoot）天然覆盖，
+  当年「kb 服务数据放同级独立目录」的顾虑随独立服务一起消失。
+- **部署面把「全局资源层」单独挂出来（M31/M32）**：compose 用两层挂载把网关私有状态与
+  全局资源层分离成独立宿主机目录，便于单独备份/迁移/共享（NFS），代码路径与 skill 发现不变：
+
+  | env | 默认 | 容器内 | 内容 |
+  |---|---|---|---|
+  | `GATEWAY_DATA_ROOT_HOST` | `./gateway-data` | `/workspace/.omp-gateway` | `gateway.db`（+WAL）等网关私有状态 |
+  | `GLOBAL_ROOT` | `./global` | `/workspace/.omp-gateway/global` | **所有会话可见的全局资源**：`skills/kb-<slug>/`、`skills/data-query/`、`kb/<slug>.db`、`kb/qmd/{config,cache}`、`wren/<name>/`、`mcp.json`、`agents/`、`extensions/` |
+
+  - 命名演变（M32）：该挂载最初叫 `KB_ROOT`（当时 global 层只有知识库），数据查询层接入后
+    层内还有 `data-query` skill、`wren/` 项目与全局 `mcp.json`——名字会误导，故改名
+    `GLOBAL_ROOT`。**它挂的是 global 整层，不是「知识库专属目录」**。
+  - 为什么是两层而不是再往下挂 `global/skills` 与 `global/kb`：Docker 为子挂载自动创建的
+    **父层**属主是宿主 root、权限 755，容器内 uid 1000 既写不进也无法 chmod——数据根不是
+    挂载点时 `gateway.db` 直接 `SQLITE_CANTOPEN`，`global` 不是挂载点时 `ensureGlobalScaffold`
+    失败（两者都实测踩到）。因此每一层要挂的目录**自身必须是挂载点**。
+  - 备份 = 打包整个 `./global`（知识库部分即 `skills/kb-*` + `kb/`；其中 `<slug>.db` 含
+    `-wal/-shm`，热备建议先停容器或让 WAL checkpoint）；迁移 = 拷到新宿主。
+  - 权限：Docker 自动创建的空挂载源目录属主是宿主 root(755) → entrypoint 启动时从数据根
+    往下逐层 `mkdir -p` + `chmod 0777`（bind mount 同步改宿主），改不动且不可写只告警
+    （知识库/数据查询接口 500，其余能力不受影响）；也可在宿主机预创建并 chmod 777。
+- `kb.json` 两处用途：① `/admin/global/skills` 的 CRUD **拒绝**操作带 kb.json 的目录
+  （`kb-` 前缀 + manifest 是网关托管保留区，防误删语料）；② `composeKbForWorkspace` 的
+  网管判定依据——fork 拷贝（fs.cp）把 junction 解引用成真目录后，靠 kb.json 仍识别为网管快照。
+- **skill 发现机制勘定（实现期确认）**：omp SDK 在显式传入 `options.skills` 时**跳过项目级发现**
+  （`pi-coding-agent/src/sdk.ts:2155/2430`）——kb skill 经 `loadScopedSkills`（扫 global/skills）
+  注入 options.skills 即到位，**无需也不要改 loadScopedSkills**；junction 不承担 skill 发现，
+  只为语料/脚本在工作区文件可达。
+- 命名：slug 走 skill 名规 `^[a-z0-9][a-z0-9-]{0,63}$`，skill 名恒为 `kb-<slug>`；
+  文档名 = zip 文件名词干净化 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（作目录名与主键）。
+
+### 38.3 kb.db schema（每 KB 一个库）
+
+```sql
+groups(id INTEGER PK, parent_id INTEGER NULL, name TEXT NOT NULL,
+       path TEXT NOT NULL UNIQUE)              -- 物化路径 'A/B/C'，ensure_group 逐级建
+docs(name TEXT PK,                            -- = zip 词干
+     group_id INTEGER NULL REFERENCES groups(id),
+     md_sha256 TEXT NOT NULL,                 -- sha256(markdown.md)，变更检测
+     pages INTEGER NOT NULL DEFAULT 0,        -- middle_json.pdf_info 页数
+     images INTEGER NOT NULL DEFAULT 0,       -- images/ 文件数
+     has_pdf INTEGER NOT NULL DEFAULT 0,      -- source.pdf 是否已补传
+     created_at TEXT, updated_at TEXT)
+```
+
+老 store.py 的 `blocks/sections/refs/terms/vectors` 全部不建：检索语料就是 md 本身，
+block 级倒排/IDF 打分/章节图这些为「服务端检索」服务的结构随检索服务一起退役。
+
+### 38.4 管理面 API（`/admin/kb/*`，X-Admin-Id，组合根挂 admin.ts）
+
+| 端点 | 说明 |
+|---|---|
+| `POST /admin/kb` | 建 KB：`{slug, title?}` → skill 骨架 + SKILL.md 模板 + kb.db |
+| `GET /admin/kb` | KB 列表（扫 `global/skills/kb-*` 的 kb.json） |
+| `POST /admin/kb/:slug/upload` | multipart：zip（一包一文档）+ 表单 `group=A/B/C`（缺省归根）；zip-slip 防护（沿用 ingest.py 词法检查）；解压落 `docs/<doc>/`，`markdown.md`→`<doc>.md`；同名重传 = 先清旧目录再落（覆盖更新） |
+| `POST /admin/kb/:slug/pdf` | multipart：pdf + 表单 `doc=<文档名>` → `docs/<doc>/source.pdf`，`has_pdf=1` |
+| `GET /admin/kb/:slug/pdf/:doc` | 前端取原始 PDF（整文件返回，`application/pdf`） |
+| `GET /admin/kb/:slug/tree` | 分组树 + 文档卡片（pages/images/has_pdf/group path） |
+| `DELETE /admin/kb/:slug/doc/:doc` | 删文档（目录 + db 行联动） |
+| `DELETE /admin/kb/:slug` | 删 KB（整 skill 目录 + kb.db；workspace 残留 junction 由下次合成重算清理） |
+
+- 上传体上限独立声明：`KB_UPLOAD_MAX_MB`（默认 2048），不借用 `/api` 的 20MB 全局面限制。
+- 所有写操作 `audit()`（沿用 admin.ts 现行审计）。
+
+### 38.5 会话期合成（照 agent-compose 范式）
+
+`prepareWorkspace` 增加 `composeKbForWorkspace`：
+
+1. 对每个 `global/skills/kb-<slug>`（含 kb.json），在 workspace `.omp/skills/kb-<slug>` 建
+   **junction/symlink** 指向 skill 目录绝对路径（Windows junction 免特权；Linux 符号链接），
+   语料与脚本在工作区文件可达，agent 的 grep/read/bash 直接作用于该路径。
+2. manifest `.omp/skills/.kb-composed.json` 记账（仿 `.gateway-composed.json`）：KB 删除后
+   下次建会话重算清理（stale）；存在网关未管理的 kb-* 条目（非链接且不含 kb.json）→ 整体跳过。
+3. skill 本体经 `loadScopedSkills` → options.skills 注入（见 §38.2 勘定）——junction 与发现
+   互不依赖；fork 拷贝把链接解引用成真目录时，含 kb.json 的快照保留不重建（自含语料仍可用）。
+4. 语义与全局资源一致：**变更对新会话生效，活跃会话保留原状**。
+
+### 38.6 查询面：omp 路由的 grep × qmd 双路组合（M29 建面 / M35 改组合）
+
+- **双路组合**（M35 修订，SKILL.md 教给 agent；判断权在 omp）：
+  - **grep 工具**（omp 内置，pi-natives 原生 ripgrep 引擎，不依赖系统 `rg` 二进制）：
+    词面可预测的锚点（寄存器/参数名、命令、缩写、错误串、表格编号）→ 直接定位行号，毫秒级，永远可用；
+  - **qmd**（lex/vec/hyde 混合排名）：语义/换说法问题（自然语言描述、因果/流程类）→ 定位文档/章节；
+  - **路由判断由 agent 按问题形态做**，不是固定先后；三种组合套路（qmd 定域→grep 定行 /
+    grep 破冰→qmd 扩面 / 双路并行）写进 `references/retrieval.md` 决策矩阵。
+  - M29 的"qmd 优先、grep 兜底"退役：单文档知识库里 qmd 只给文档级结果，行号始终靠 grep——
+    把 grep 降级为兜底会诱导 agent 在 grep 就能秒答的场景先绕道 qmd。
+- **可用性降级链**（M29 引入，继续有效）：qmd MCP 工具（`collections=["kb-<slug>"]` 定域，
+  返回 `qmd://kb-<slug>/docs/...` URI → 映射 `.omp/skills/kb-<slug>/docs/...`）→ CLI
+  （`qmd --index kb search/vsearch`）→ 纯 grep（qmd 缺失/索引未建时，能力不缺只是没有增强排名）。
+- 引用仍带文档名 + 页码（MinerU 命名 `page_N` 即 PDF 第 N 页，md 与图名天然带页码语义）。
+- 无自建检索服务、无打分管线——旧 search.py 的 rg 语料/行映射/IDF×TF/融合全部退役。
+- 老 `/kb/search`、`/kb/agent`（CrewAI）不迁移：需要检索能力的业务方自己起 omp 会话
+  （决策层在调用方，与旧设计 §1 拍板一致）。
+
+### 38.7 出图：skill 自带 Python 脚本，网关零渲染
+
+| 脚本 | 功能 | python 依赖 |
+|---|---|---|
+| `kb_shot.py --doc <名> --page N [--table M \| --image M \| --bbox x0,y0,x1,y1]` | 从 `source.pdf` 按 middle_json 的 bbox 高保真重渲染 → PNG（MinerU 裁剪质量不够时的兜底） | pymupdf |
+| `kb_asset.py --doc <名> --image <images/ 下相对路径>` | 已有裁剪图 → MinIO 上传 → 输出公网 URL（内容寻址 key：sha256 前 16，跨文档同图去重） | minio |
+
+- 输出统一 JSON 到 stdout：`{"url": "https://…"}` 或 `{"path": "<assets/ 下本地路径>"}`，
+  SKILL.md 教 agent 解析并引用。
+- **MinIO 未配置**（`KB_MINIO_ENDPOINT` 缺省）→ 两个脚本都落 `assets/` 本地路径；
+  agent 在 workspace 里可直接引用该路径。
+- `pymupdf`/`minio` **构建期烘进镜像**（Dockerfile runtime 层 `pip install`，内网构建经
+  build-arg `PIP_INDEX_URL` 传镜像源；compose 已透传）——会话内 `python scripts/kb_shot.py`
+  开箱即用。`KB_SKILL_PY_DEPS=1` 保留为 entrypoint 运行时兜底（旧镜像/精简构建）；
+  网关进程自身零 PDF/minio 依赖。运行时 apt 层另加 `jq`（agent 解析结构化 JSON 高频用）。
+
+### 38.8 env（容器启动配置，脚本直读）
+
+| 变量 | 说明 | 缺省行为 |
+|---|---|---|
+| `KB_MINIO_ENDPOINT` | MinIO 写入端点（内网，如 `minio:9000`） | 脚本落本地 `assets/` |
+| `KB_MINIO_ENDPOINT_PUBLIC` | 输出 URL 拼接端点（外网）——上传走内网 ENDPOINT、报告贴的 URL 用这个基址重写 | 缺省 = ENDPOINT（URL 内网化，外网不可达） |
+| `KB_MINIO_ACCESS_KEY` / `KB_MINIO_SECRET_KEY` | 凭证 | — |
+| `KB_MINIO_BUCKET` | 桶名，自动建桶 + 公共读 policy | `kb-assets` |
+| `KB_MINIO_SECURE` | "1" → https 连接 MinIO | http |
+| `KB_UPLOAD_MAX_MB` | upload/pdf 路由 body 上限 | 2048 |
+| `KB_SKILL_PY_DEPS` | =1 时 entrypoint 兜底安装 pymupdf+minio（镜像已内置，通常直接命中「已就绪」） | 不装 |
+| `KB_QMD_BIN` | qmd 可执行文件路径 | `qmd`（PATH 查找） |
+| `KB_QMD_INDEX` | qmd 命名索引名（白名单校验） | `kb` |
+| `KB_QMD_MCP` | =1：entrypoint 起 qmd MCP daemon + 网关注册全局 mcp.json | 不启用 |
+| `KB_QMD_EMBED_BASE_URL` / `KB_QMD_EMBED_API_KEY` / `KB_QMD_EMBED_MODEL` | 远程 embedding 三件套（OpenAI 兼容；ark doubao / 自建 ollama），qmd patch 消费 | 未配置 = 本地 GGUF |
+| `KB_QMD_EMBED_BATCH` | 远程 embedding 批大小 | 16 |
+| `QMD_CONFIG_DIR` / `XDG_CACHE_HOME` | qmd 配置与缓存根（compose 指到 dataRoot 内） | qmd 默认（~/.config、~/.cache） |
+
+网关不解析 KB_MINIO_*（零 minio SDK）：docker-compose 注入 → 容器 env → 会话 bash
+子进程直接继承 → 脚本读取。entrypoint 另做一条连通性告警（沿用 §37 的告警风格，只告警不阻塞）。
+
+### 38.9 SKILL.md 模板（网关生成，标准 skill 形态）
+
+按 skill-creator 规范（metadata → body → references 三层渐进披露）：
+
+```
+global/skills/kb-<slug>/
+├── SKILL.md                  ~55 行：何时用/不用、三步检索流程、引用示例、目录结构、参考文件索引
+├── kb.json                   管理标记
+├── references/               按需读取（不预读）
+│   ├── retrieval.md          双路对照/路由判断/三种组合套路/grep 工具参数/qmd MCP+CLI/无响应处置/迭代准则
+│   ├── pagination.md         双页码语义（印刷页 vs PDF 物理页）、pages.txt 三列用法、middle_json
+│   └── imaging.md            kb_shot/kb_asset 用法、输出 JSON 形状、MinIO/本地交付
+├── scripts/{kb_shot,kb_asset}.py
+├── docs/                     语料（检索对象）
+└── assets/                   出图输出
+```
+
+- **frontmatter**：`name: kb-<slug>`（与目录名一致、kebab）；`description` 是唯一常驻上下文的触发信号，
+  写足「做什么 + 什么场景必须用」并含同义表述（标准号/章节号/「第几页」/「这张表」），略偏 pushy
+  （模型倾向于**少**触发 skill）。
+- **body 精简**：只留决策级信息（何时用/不用、三步流程、引用格式字面示例、文件索引）；细节
+  （工具参数、页码换算、脚本参数）全部下沉 references，主体按需读取，避免每次触发都占上下文。
+- **模板静态**：不含 KB 内文档清单（避免入库/删文档后失同步）。文献示例用占位（`<文档名>`）而非真实清单。
+- **升级路径**：`refreshAllKbSkills()`（网关启动时）对存量 KB 重写 SKILL.md + references + scripts，
+  内容一致不落盘；改模板必须重启网关才生效。
+
+### 38.10 分期
+
+- **M28-a**：paths 常量（`globalKbDir()`）+ kb.db + zip 透传入库 + `/admin/kb` 全部端点 + tree
+- **M28-b**：`composeKbForWorkspace` + SKILL.md 模板生成（skill 发现经 options.skills，无需改 loadScopedSkills）
+- **M28-c**：`kb_shot.py` / `kb_asset.py` + entrypoint 依赖安装与告警 + compose env / .env.example
+- **M28-d**：openapi.ts 四表登记（`docs:check` 门禁）+ 单测（ingest/tree/命名净化）+
+  集成测试（integration-scoping 式：新会话 workspace 可见 KB skill、语料可 grep）+ 文档同步
+- **M29**：qmd 检索层（§38.12）——provider patch + 网关 spawn 封装与入库钩子 + MCP daemon
+  与全局注册 + SKILL.md 三级检索策略 + env/compose/Dockerfile + kb-qmd 测试
+
+### 38.11 退役对照（la-sequence-script → 本网关）
+
+| 老件 | 去向 |
+|---|---|
+| store.py blocks/sections/refs/terms/vectors | 不迁移（md 即语料，检索靠 agent） |
+| ingest.py doclib.db 解析 | 重写为 ParseOutcome zip 透传（上游格式已换代） |
+| search.py / vector.py / agent.py / mcp_server.py | 退役，omp 原生取代 |
+| screenshot.py | → `scripts/kb_shot.py` |
+| storage.py（MinIO 单例） | → `scripts/kb_asset.py` |
+| `/kb/tree` `/kb/groups` | → `GET /admin/kb/:slug/tree` |
+| `/kb/pdf/{sha}` 补传 | → `POST /admin/kb/:slug/pdf`（按文档名） |
+
+### 38.12 qmd 检索层（M29）——BM25+向量混合，索引随入库构建
+
+> 检索引擎引入 [tobi/qmd](https://github.com/tobi/qmd) v2.8.3（MIT）：BM25(FTS5) + 向量语义
+> 搜索 + RRF 融合，collection 管理/增量索引/900-token 智能分块/指纹失效重嵌入全由它承担。
+> 查询面见 §38.6（MCP 工具 > CLI > grep 三级）。
+
+**索引布局与生命周期**：
+
+- 单一命名索引 `kb`（`--index kb`），每个知识库一个 collection：`kb-<slug>` →
+  `global/skills/kb-<slug>/docs`。配置与缓存指进 dataRoot（compose 注入
+  `QMD_CONFIG_DIR`/`XDG_CACHE_HOME` → `global/kb/qmd/{config,cache}`），随迁移 bundle 走。
+- **入库即构建，update 同步 / embed 异步**（M30，全部 best-effort，qmd 缺失/失败只告警）：
+  - `createKb` → `collection add`；`ingestZip`/`deleteDoc` → **同步** `qmd update`（BM25 秒级，
+    上传响应返回时关键词检索已含新文档）；
+  - 紧接着 `scheduleKbQmdEmbed(slug)`：**后台单飞异步** `qmd embed`（向量分钟级；同 KB 并发
+    触发复用同一任务，不排队）。理由：585 页实测 embedding 约 100s，若同步等在上传请求里，
+    会撞上游 60s 超时并诱发重试重复上传——改造后上传响应 1m43s → **6.3s**。
+  - `ingestPdf` 不触发重建（PDF 不进文本语料）；
+  - `deleteKb` → `collection remove`。
+  - 状态可见：`GET /admin/kb/:slug/index-status`（`state: idle|running|ok|failed|skipped|unavailable`
+    + startedAt/finishedAt/error + `inFlight`）；`?probe=1` 额外读一次 `qmd status` 给出
+    `{needsEmbedding, vectorIndex}`（进程内状态重启即失，probe 是真相源）。
+  - 网关封装 `core/kb/qmd.ts`（spawn argv 数组，无 shell，slug 先过 assertSlug；
+    `KB_QMD_BIN` 解析，找不到全函数 no-op）。
+- **embed 三件套保护**：`KB_QMD_EMBED_BASE_URL/API_KEY/MODEL` 齐才跑 embed，否则跳过
+  （BM25 即刻可用）——防止未配置时意外触发本地 GGUF 模型下载挂起。
+
+**远程 embedding provider patch**（qmd 原生只支持本地 GGUF，不支持 API）：
+
+- patch 交付 `gateway/docker/qmd-patch/apply.mjs`（幂等、可 `--revert`，Docker 构建期对
+  全局安装执行；provider 源码内嵌）。改三处 LLM 工厂缝：`dist/llm.js getDefaultLlamaCpp()`、
+  `dist/index.js`、`dist/cli/qmd.js` 的 `new LlamaCpp(...)` → 远程装饰器（三件套配置时），
+  未配置时行为与原生完全一致。
+- 装饰器：`embed/embedBatch` → `POST {BASE}/embeddings`（仅 http(s)、120s 超时、批
+  `KB_QMD_EMBED_BATCH` 默认 16、并发 ≤4、按响应 index 保序、单批重试 2 次后整批复 null
+  交 qmd 断点续跑）；`expandQuery` 退化为原查询双路（lex+vec，不用 1.7B 扩展模型）；
+  `rerank` 等分（保持 RRF 序，不用 0.6B 重排模型）；`tokenize/detokenize` 启发式分词
+  （qmd 分块器硬依赖 `llm.tokenize`——远程模式**绝不触 node-llama-cpp**，构造期零 import）；
+  `QMD_EMBED_MODEL=api:<model>` 在工厂缝前设入 → 嵌入指纹与 doctor/status 反映远程模型。
+- 首选模型 ark `doubao-embedding-text-240715`（2560 维，OpenAI 兼容 `/embeddings`），
+  已端到端验证（中文/跨语言 vsearch 命中）；切自建 ollama 只改三件套 env（继承 la-sequence-script
+  老 .env 的设计意图）。sqlite-vec 维度自由，2560 维直接可用。
+
+**全局 tool 注册**（omp 会话原生可见）：
+
+- `KB_QMD_MCP=1` 时：entrypoint 起 `qmd --index kb mcp --http --daemon`（默认 127.0.0.1:8181/mcp；
+  共享 daemon 让模型只加载一次，避免 stdio 每会话重复加载）；网关启动
+  `ensureQmdMcpRegistered()` 幂等写入 `global/mcp.json`：`mcpServers.qmd = {type:"http",
+  url:"http://127.0.0.1:8181/mcp"}`。环回地址是部署方 env 声明的同容器内部服务（非用户可控
+  URL），与 `GATEWAY_WEBHOOK_HOSTS_ALLOWLIST` 的内网信任模型一致。
+- 未启用 KB_QMD_MCP 时 agent 走 CLI；qmd 缺失则纯 grep 路（§38.6 降级链保证可用性）。
+
+**注意**：开发机 `bun install -g` 的 bin 目录（`~/.bun/bin`）可能不在默认 PATH——集成测试
+（`test/kb-qmd.test.ts`，skip-if-absent 设计）与网关 spawn 都依赖 `KB_QMD_BIN`/PATH 能找到 qmd。
+
+#### 38.12.1 实测定论：未配三件套时查询会静默挂死（M29 排障记录）
+
+真实 JEDEC 语料（585 页 / 879 chunks）端到端时踩到并已定位：
+
+| 条件 | `qmd vsearch` / daemon `/query` | 说明 |
+|---|---|---|
+| 三件套齐（ark doubao） | **1.4–2.5s 正常返回**（中文 73%/69%、混合 query 100%） | patch 生效，provider 直连 API |
+| 三件套缺 | **静默挂死 45–130s+**：stdout/stderr 全空、CPU 0% | patch 不启用 → 原生本地 GGUF；node-llama-cpp 原生二进制缺失时**既不报错也不退出**，卡在模型初始化/下载 |
+
+排除项（均实测正常，非 SQLite/代理/委托面问题）：BM25 `search` 0.15s、`get` 0.14s、
+provider 独立 embed 158ms、SDK 直连 `searchVector` 231ms、`qmd status` 正常；带/不带
+`HTTPS_PROXY` 结果一致（MinerU CDN 下载确需绕代理，与此无关）。
+
+由此落地的两道门禁：
+1. **entrypoint**：`KB_QMD_MCP=1` 但三件套不全 → **不启动 daemon**（告警），会话退化为纯 grep 路；
+2. **SKILL.md**：提示 agent「`vsearch/query` 无响应立即放弃 qmd 改走 grep 路」——CLI 路径
+   不经 entrypoint，只能靠指令层止损。
+
+部署要求：启用 `KB_QMD_MCP=1` 或使用语义检索时，`KB_QMD_EMBED_BASE_URL/API_KEY/MODEL` 必须配齐；
+只配 BM25（`qmd search`）不需要三件套。
+
+## 39. 数据查询层（M32）——WrenAI 语义层集成，会话内自然语言问数
+
+> 选型调研（2026-11-17）覆盖 WrenAI/DB-GPT/SuperSonic/SQLBot/vanna（已归档）/Dataherald（已死）/
+> Chat2DB/SQLChat/nao 九个候选后定版：**WrenAI 新版**（agent-native 转型后）以 Apache 2.0 +
+> 「omp 会话 LLM 生成 SQL、Wren 语义层校验与受控执行」的分工方式成为最优解——SQL 生成智能由
+> omp 会话供给（携带完整上下文），Wren 提供治理（dry-plan 验证/行数上限/结构化错误/MDL 语义层），
+> 不重复造 agent。SQLBot（单容器 MCP 问数，GPLv3 修改版）为备选；DB-GPT（MIT）为替代预案。
+
+### 39.1 集成形态（方案 A：wrenai 烘进 omp 镜像）
+
+- `wrenai 0.18.x` 为**纯 Python wheel（py3-none-any）**，py3.14 直接可用；Dockerfile runtime
+  pip 层追加 `wrenai[mcp,postgres,clickhouse]`（同 `PIP_INDEX_URL` build-arg 源），冒烟 `wren version`。
+- 会话内 agent 经 bash 直接用 `wren` CLI（建模/查询/经验沉淀），与 grep/qmd 三通道并存。
+- 每个数据源 = 一个 Wren 项目 + 一个 MCP http daemon：`wren serve mcp --transport http
+  --host 127.0.0.1 --port <base+i> --project <dir> --quiet`（网关 spawn，端口被监听则复用）；
+  项目目录 `<dataRoot>/global/wren/<name>/`（随 GLOBAL_ROOT 卷持久、宿主可读）。
+
+### 39.2 env 契约与启动流程
+
+| 变量 | 说明 |
+|---|---|
+| `WREN_MCP=1` | 启用数据查询层 |
+| `WREN_HOME=/workspace/.omp-gateway/wren` | profiles.yml 持久化（随 gateway-data 卷） |
+| `WREN_DATASOURCES=pg,ch` | 数据源名列表（`^[a-z][a-z0-9-]{0,15}$`），每名一个项目+daemon |
+| `WREN_DS_CONNECTIONS={"pg":{...},"ch":{...}}` | 连接 JSON（字段以 `wren docs connection-info <ds>` 为准；`datasource` 字段必需） |
+| `WREN_MCP_PORT_BASE=8081` | 第 i 个数据源 daemon 端口 = base+i |
+| `WREN_BIN` | wren 可执行文件解析（默认 PATH 查找） |
+
+`ensureWrenDatasources()`（网关启动，`ensureQmdMcpRegistered` 之后，全 best-effort）：
+① 读注册表 → env 种子合并（仅补缺失名，admin 条目优先）→ 全量 provision（幂等；
+daemon 端口已监听则注入密钥 env 复用——v1 修过的无条件注入保留）→
+② 写 connection JSON → `wren profile add <name> --from-file`（`--no-validate`：不可达主机的
+默认校验会挂 ~2 分钟，校验留给查询期；profiles 支持 `${VAR}` 占位符——**密钥以
+`WREN_SECRET_<名>_<字段>` 占位落盘，明文仅进程 env 传递，挂载卷 grep 无泄露**）→
+③ 项目骨架 `wren context init --empty`（已存在不覆盖）→ `context set-profile` →
+④ 内省 + 生成 models（见 §39.2.1；失败非致命）→ `context build`（空模型集也产出
+target/mdl.json）→ ⑤ spawn daemon →
+⑥ 注册 `wren-<name>` 进 global/mcp.json（`{type:http, url:http://127.0.0.1:<port>/mcp}`）→
+⑦ 物化全局 skill `data-query`（SKILL.md + references/，references 内容 = `wren skills get
+onboarding/usage/generate-mdl` 输出——**随安装版本自动匹配**）。
+
+### 39.2.1 数据源管理 admin API（v2：注册表 + 运行时增删改查 + MDL 自动生成）
+
+**注册表（唯一事实源）**：`<dataRoot>/global/wren/datasources.json`（写后 chmod 600）：
+
+```json
+{"pg": {"datasource":"postgres","connection":{...},"tables":["public.orders"]|null,
+        "port":8081,"createdAt":"...","updatedAt":"...","daemonPid":123,"lastError":null}}
+```
+
+- `tables`：null/缺省 = 全部非系统表；数组 = "schema.table" 精确匹配白名单。
+- `port`：创建时从 `WREN_MCP_PORT_BASE` 起找第一个「未被注册表占用且未监听」的端口，
+  **写入注册表稳定复用**；`daemonPid` 供重启/删除时定点杀进程（容器重启后自然失效）。
+- env（§39.2 的 WREN_DATASOURCES/WREN_DS_CONNECTIONS）= **种子**：启动合并仅补缺失名，
+  已存在的 admin 条目优先；wren CLI 缺失时不写种子（避免僵尸条目）。
+
+**内省 + MDL 自动生成（零新依赖）**：
+
+- postgres：Bun 内置 `SQL`（`new SQL(连接串)`，连接串由注册表 connection 拼装——部署方/
+  admin 提供，非用户输入）；固定常量查询 `information_schema.columns`（WHERE 排除
+  pg_catalog/information_schema；无插值 → 无注入面）。
+- clickhouse：HTTP POST 固定常量查询 `system.columns`（`httpPort` 缺省 8123，
+  X-ClickHouse-User/Key 认证），`FORMAT TabSeparatedWithNames` 解析。
+- 其余数据源类型跳过内省（空骨架路径，agent 可手动建模）；duckdb 即此类。
+- `tables` 白名单过滤 → 每表一个 `models/<name>/metadata.yml`（wren schema v5 的
+  directory-per-model 布局；键名以 `wren skills get generate-mdl` 为准：name /
+  properties.description / table_reference{catalog,schema,table} / columns[{name,type}]）。
+  **types 原样透传**（目录数据）；catalog 取连接的 database。跨 schema 同表名 → 全部加
+  schema 前缀（命名基于全量目录行，与白名单收紧无关，保证模型名稳定）。
+- **YAML 手写安全序列化**：所有字符串双引号 + 转义（`\ " \n \r \t`、其余控制字符 →
+  `\uXXXX`）——列名/表名是目录数据，绝不进 SQL（目录查询固定常量，满足参数绑定约束）。
+- 生成是纯函数（`mdlModelsFromRows(rows, tables, catalog)`），fixture 单测覆盖特殊字符。
+- 业务描述/指标由会话 agent 后续 enrich（同文件补 properties.description / 关系 / 知识）；
+  v3（M34）起模型生成走**按表指纹的增量**（§39.2.2）：指纹一致不落盘，指纹变化只重写
+  columns/table_reference 并保留 agent enrich 的 description；注册表记 `generatedModels`
+  与 `catalogHash`，已消失表的自动生成目录随收敛移除，agent 手建 model 永不删除。
+  重要语义仍建议沉淀到 knowledge/（rules/ 与 sql/ 不受内省影响）。
+
+**admin 路由**（`/admin/wren/*`，requireAdmin 继承；全部 `audit("admin.wren.*")`；
+GET 响应 connection 敏感字段恒为 `******`；变更操作与启动 provision 串行化互斥）：
+
+| 端点 | 语义 |
+|---|---|
+| `GET /admin/wren/datasources` | 列表（state/daemon 端口与存活/models 数/updatedAt） |
+| `GET /admin/wren/datasources/{name}` | 详情 |
+| `PUT /admin/wren/datasources/{name}` | 创建/更新（合并 connection/tables）→ 全量 re-provision → 201/200 |
+| `DELETE /admin/wren/datasources/{name}` | 杀 daemon → mcp.json 移除 → 项目目录删除 → 注册表移除 |
+| `POST /admin/wren/datasources/{name}/rebuild` | 重内省 + 重生成 + build + **daemon 重启**（新 MDL 快照生效，§39.5.1） |
+| `POST /admin/wren/datasources/{name}/test` | 仅连接测试（PG `SELECT 1` / CH 内省 LIMIT 1；body 可给未落库载荷） |
+
+- PUT/rebuild 需 wren CLI（503 `WREN_UNAVAILABLE`）；层未启用 409 `WREN_DISABLED`；
+  内省失败 → 注册表 `lastError`、GET `state:"error"`、骨架/daemon 照常（非致命）。
+- DELETE 的 profiles.yml 残留 profile 条目无害（无项目绑定即不被解析），保留以简化幂等。
+
+**无人值守 schema 同步（v3/M34，§39.2.2）**：用户表结构未定稿、持续演进场景下，网关按
+表指纹做 drift 检测并增量更新语义层——自动生成 + 增量、不覆盖 agent 的 enrich。
+
+- **表指纹**（`tableFingerprint`，core/wren/models.ts）：单表的规范化目录行（`column:type`
+  按列名排序，行序无关）拼串 → sha256 前 12 位。生成的每个 `models/<name>/metadata.yml`
+  在 properties 写入所有权标记：`gateway_generated: true` + `table_fingerprint`。
+- **目录哈希**（`catalogHash`）：全部内省行按 `schema.table.column:type` 规范化排序 →
+  sha256 前 12 位，存注册表（drift 基线）；与基线相同 → 短路（不 build、不重启 daemon）。
+- **增量六情形**（`planModelWrites`，纯函数；PUT/rebuild 的生成同走此路径）：
+
+| 情形 | 行为 |
+|---|---|
+| 现有 model 指纹 == 当前 | unchanged（**不写文件**，agent enrich 安全） |
+| 指纹不同 + `gateway_generated: true` | 重写 columns/table_reference，**保留原 `properties.description`**（非生成占位时） |
+| 指纹不同 + 非 gateway_generated（agent 手建） | 跳过（不动） |
+| 新表（在 tables 白名单内） | 生成（带标记） |
+| 表消失 + gateway_generated | deletes（删除目录） |
+| 表消失 + 非 gateway_generated | 保留 |
+
+  现有 model 解析用**行扫描**（只认自己的固定格式，不引 YAML 库）；解析失败（agent 大改
+  结构）→ 视为非网关生成跳过。v3 之前的生成文件（无标记 + 占位 description）自动识别为
+  网关生成（升级自愈：下次 sync/rebuild 补写指纹；已被 enrich 的旧文件保守视为手建）。
+- **调度**：env `WREN_AUTO_SYNC_MIN`（分钟，默认 **1440**=24h；`0`=关闭；非法/超上限回落
+  默认）。启动流程：`ensureWrenDatasources()`（provision 成功即基线 catalogHash）→
+  `syncAll()` 一次（drift 检查，无变化零 rebuild）→ `startWrenAutoSync()`（`setInterval
+  (...).unref()`，首轮延迟一个间隔不抢启动；优雅关停时清除）。
+- **sync vs rebuild**：`POST /admin/wren/datasources/{name}/sync`（body 可选 `{"force":true}`）
+  按 drift 增量——无变化零成本；`force` 跳过短路（无内省器类型如 duckdb 仅重编译 + 重启
+  daemon）。`POST /admin/wren/sync` 全量遍历（单个失败不中断）。`rebuild` 语义保持**无条件
+  重建**（内省 + 重生成 + build + daemon 重启全链路）。全部经 `enqueueWrenOp` 与启动
+  provision 串行；audit `admin.wren.sync` / `admin.wren.sync_all`。
+- **失败降级**：内省/连接失败 → 不改任何模型文件、注册表写 `lastSyncError`（旧模型继续
+  服务）、返回 `{changed:false}`；context build 失败 → 不重启 daemon、不基线 catalogHash
+  （下次 sync 重试）；daemon 重启超时 → 记 `lastSyncError`（进程保留稍后自愈）。
+  GET DTO 新增 `catalogHash` / `lastSyncedAt` / `lastSyncError`（connection 脱敏规则不变）。
+
+### 39.3 建模与查询（分工）
+
+- **建模（agent 驱动，Wren 官方设计）**：会话 agent 按 `wren skills get generate-mdl` 内省
+  information_schema → 每表一个 `models/*.yml`（含描述/关系/指标）→ `wren context build` +
+  `wren memory index`。YAML 落挂载目录，PR 可审阅；schema 演进同流程重跑。
+- **查询（会话内三步）**：`describe_schema`（MDL 上下文）→ 写 SQL → `dry_plan`/`dry_run` 校验
+  → `run_sql` 执行（默认 1000 行 cap/硬上限 10000）。CLI 等价 `wren query --read-only --sql`
+  （执行前拒绝写入/DDL/多语句/锁）。
+- **经验沉淀**：`wren memory store/recall`——NL→SQL 对存 `knowledge/sql/*.md`（Git 可审阅），
+  grep 后端零依赖；`[memory]` extra（LanceDB+torch ~800MB）默认**不装**。
+- MCP 工具 17 个（run_sql/dry_run/dry_plan/query_cube/get_mdl/list_models/describe_model/
+  describe_schema/get_data_source/list_cubes/describe_cube/list_functions/get_instructions/
+  recall_queries/get_context/list_knowledge/list_stored_queries），全部 readOnlyHint；
+  端点 `http://127.0.0.1:<port>/mcp`（FastMCP streamable-http）。
+
+### 39.4 安全与信任模型
+
+- MCP http **无鉴权**（wren 该版本设计）→ 127.0.0.1 环回绑定 + 同容器（与 qmd daemon 一致）；
+  跨容器部署需自行加网关认证。
+- DB 凭证：以 `${WREN_SECRET_*}` 占位符进 profiles.yml，明文仅存在于网关进程 env；
+  数据库侧建议只读账号（`wren query --read-only` 是执行前防线，非权限替代）。
+- 行/列级权限为 Wren 商业版能力；多租户细粒度权限当前靠只读账号 + 视图。
+
+### 39.5 已知限制（实测）
+
+1. daemon 的 MDL 为启动时快照：会话内 `wren context build` 后需重启 daemon 才在 MCP 生效
+   （过渡方案：CLI `wren --sql` 每次即时编译）；网关重启复用存量 daemon 同理。
+2. `profile add --no-validate`：连接错误首次查询才暴露（daemon 未监听时网关只告警）。
+3. daemon 启动即死不会自动重建（需下次网关重启；已知触发路径已修——重启复用 profile 时
+   密钥 env 无条件注入）。
+4. 镜像体积 +~880MB（wrenai + duckdb/pyarrow 依赖），3.44GB → 4.32GB。
+5. ClickHouse 链路未容器实测（本机 Docker Hub 不可达）；PG 全链路已验证（真实数据聚合
+   精确命中）。
+6. （v3/M34 已修）原「rebuild 覆盖 enrich」不再成立：模型生成按表指纹增量（§39.2.2）——
+   **增量保留 enrich** 的 description，agent **手建 model 永不被删**；schema 变化经
+   `sync` 无人值守生效，`rebuild` 保留为无条件重建的兜底手段。
+
+## 40. 结构优化（M33）——Wren 挂接拆分 + mcp.json 单点读写
+
+### 40.1 诊断（重构前实测）
+
+| 坏味道 | 证据 | 后果 |
+|---|---|---|
+| **God File** | `core/wren.ts` 1154 行挤了 12 个职责（env 解析/注册表/连接脱敏/内省/PG+CH 适配/MDL 生成/子进程/daemon/mcp.json/skill/启动编排/admin 队列） | 改一处要读全文；单测只能覆盖纯函数，I/O 面无法隔离 |
+| **mcp.json 三处独立读-改-写（真竞态）** | `wren.ts:921/949` + `kb/qmd.ts:309` 各自「读文件 → 改内存 → 写回」 | 启动时 qmd 与 wren 注册并发 → 后写者覆盖前者条目（丢 server） |
+| **子进程样板重复** | `runWren` 与 `runQmd` 各写一遍 spawn+超时强杀+stdout/stderr 截断+失败日志 | 行为漂移风险；修复要改两份 |
+| **best-effort 告警重复** | 两模块各自 `truncate` + `console.error(...)` 模板 | 日志格式与截断长度可能分叉 |
+
+### 40.2 模式映射
+
+| 模式 | 落点 | 解决的问题 |
+|---|---|---|
+| **Repository**（仓储） | `core/mcp-registry.ts`、`core/wren/registry.ts` | 各自单点管理一个持久化文件（global/mcp.json、datasources.json），调用方不再直接碰 fs |
+| **Adapter**（适配器） | `core/proc.ts`（命令执行）、`core/daemon.ts`（长驻进程）、`core/wren/introspect/{postgres,clickhouse}.ts`（目录查询→`WrenCatalogRow`） | 把平台/驱动差异收进单一实现，业务层只面向统一接口 |
+| **Factory**（工厂） | `core/wren/introspect/index.ts:selectIntrospector(datasource)` | 类型分发；未适配类型返回 `null` → 空骨架路径（duckdb 等） |
+| **Strategy**（策略） | `Introspector` 接口的两个实现（`introspect` / `testConnection`） | 新增数据源类型 = 新适配器 + 工厂表一行，不动编排 |
+| **Template Method**（模板方法） | `core/wren/service.ts:WrenService.provision` | 固定八步骨架（profile→scaffold→introspect→generate→build→daemon→mcp→skill），子步可覆盖；失败降级语义集中在骨架里 |
+| **Facade**（门面） | `core/wren/index.ts`、`core/wren.ts` 壳、`WrenService` 的自由函数包装 | 外部 import 路径与签名零改动；路由/入口无需感知拆分 |
+| **Command**（命令队列） | `core/wren/operation-queue.ts:enqueueWrenOp` | PUT/DELETE/rebuild 与启动 provision 串行化（注册表/daemon 互斥） |
+| **Singleton**（单例） | `mcp-registry.ts` 模块级 promise 链、`defaultWrenService`、env 解析函数 | 进程内唯一队列/实例；并发读-改-写线性化 |
+
+### 40.3 目标结构树（含行数）
+
+```
+src/core/
+├── proc.ts                 92   # runCommand/resolveBin：spawn+超时+2048 截断（wren/qmd 共用）
+├── daemon.ts              125   # DaemonSupervisor：isPortListening/isPidAlive/spawnDaemon/killPid
+├── mcp-registry.ts        106   # global/mcp.json 唯一读写点（模块级串行锁 + 深比较幂等）
+├── wren.ts                  5   # 兼容壳：export * from "./wren/index.ts"
+├── wren/
+│   ├── index.ts            15   # Facade：聚合公开面（原 export 名全部可用）
+│   ├── env.ts             110   # WREN_BIN/HOME/PORT_BASE、种子解析、三个白名单正则
+│   ├── registry.ts        127   # datasources.json Repository（0600）+ 种子合并 + 端口分配
+│   ├── models.ts          109   # 纯函数：quoteYamlString/sanitizeModelName/catalogOf/omitsCatalog/mdlModelsFromRows
+│   ├── introspect/
+│   │   ├── types.ts        26   # WrenCatalogRow + Introspector 接口
+│   │   ├── postgres.ts     61   # Adapter：information_schema.columns（排除系统 schema）
+│   │   ├── clickhouse.ts   58   # Adapter：system.columns（database 限定 + information_schema 排除）
+│   │   └── index.ts        49   # Factory：selectIntrospector / introspectWrenDatasource / testWrenConnection
+│   ├── project.ts         115   # 占位符/profile/骨架/writeIfChanged（wren CLI 包装）
+│   ├── daemon.ts           99   # ensureWrenDaemon/killWrenDaemonFor/countWrenModels
+│   ├── mcp.ts              37   # registerWrenMcpServers/removeWrenMcpServer
+│   ├── skill.ts           134   # SKILL.md 模板 + references 物化 + refresh
+│   ├── operation-queue.ts  15   # enqueueWrenOp / runWrenAdminOp（Command 队列）
+│   └── service.ts         296   # WrenService：八步模板 + deprovision + ensureAll + DTO
+└── kb/qmd.ts              219   # 仅保留 qmd 语义；spawn→proc、mcp.json→mcp-registry
+```
+
+**拆分原则**：env 只依赖 config/proc；registry 只依赖 env + core/daemon；project/daemon/mcp/skill
+只依赖 env/registry/core 底座；service 只做编排（经各子模块，不重复实现）；index 只聚合导出。
+纯函数（models）不 import I/O；适配器只依赖 types + 驱动。
+
+### 40.4 兼容层策略（strangler）
+
+- `gateway/src/core/wren.ts` 保留 5 行壳：`export * from "./wren/index.ts";`。历史导入方
+  `src/index.ts`、`routes/admin-wren.ts`、`test/unit/wren.test.ts` **零改动**；所有原
+  export 名/签名在 `core/wren/index.ts` 原样可用（`WrenService` 为新增能力）。
+- qmd 无壳：`core/kb/qmd.ts` 路径与导出集合保持不变（`kbQmdAdd/kbQmdUpdate/kbQmdRemove/
+  scheduleKbQmdEmbed/kbEmbedStatus/kbEmbedRunning/kbQmdStatusProbe/ensureQmdMcpRegistered/
+  qmdSubprocessEnv/qmdIndexName/qmdBin/qmdDirs`）。
+- **何时删壳**：当 `rg 'core/wren\.ts' gateway/src gateway/test` 只剩壳自身时，把上述 3 处
+  import 改到 `core/wren/index.ts` 并删除 `core/wren.ts`（建议作为 M34 的机械清理，不夹带
+  逻辑改动）。
+
+### 40.5 行为不变清单（回归断言口径）
+
+- 日志前缀仍为 `[gateway:wren]` / `[gateway:qmd]`；stdout/stderr 截断 2048 字符。
+- 全部 best-effort：启动挂接失败只告警不阻塞；`WREN_MCP!=1` / `KB_QMD_MCP!=1` no-op；
+  qmd 缺失返回 `{ok:false, reason:"qmd not installed"}`。
+- 密钥占位符 `WREN_SECRET_<NAME>_<FIELD>`、profiles.yml 零明文；`--no-validate` 保留。
+- CH 两段式 `table_reference`（省略 catalog）、内省排除 `system`/两个 `information_schema`、
+  跨 schema 同名表的稳定命名均原样保留。
+- daemon 端口复用（启动路径）与 PUT/rebuild 定点杀（pid→端口释放等待）不变；
+  skill 的 `SKILL_NAME=data-query` 与 `SKILL_GUIDES` 三项不变。
+- 唯一有意的可观察差异：`mcp-registry.upsert` 用**内容深比较**判幂等（旧 wren 只比 url）。
+  若有人手工给 `wren-*` 条目加了额外字段或写错 `type`，下一次 upsert 会把它规范化为
+  `{type:"http", url}`——这是「只增/改给定键、内容一致不落盘」共享契约的要求。
+
+### 40.6 验收数字
+
+| 指标 | 重构前 | 重构后 |
+|---|---:|---:|
+| `core/wren.ts` | 1154 行（12 职责） | **5 行**（兼容壳） |
+| `core/kb/qmd.ts` | 324 行 | **219 行** |
+| wren 家族最大单文件 | 1154 行 | **296 行**（`service.ts`） |
+| global/mcp.json 写点 | 3 处独立读-改-写 | **1 处**（`mcp-registry.ts`，串行锁） |
+| 子进程 spawn 实现 | 2 份 | **1 份**（`proc.ts`） |
+| 单测 | 105 pass / 11 文件 | **110 pass / 12 文件**（新增 `test/unit/mcp-registry.test.ts`：并发 upsert 不丢键、幂等不重写、remove 精准删） |
+
+验证命令与结果：`bun run typecheck` 0 error；`bun run test:unit` 110 pass / 0 fail；
+`bun run docs:check` 212/212 documented、0 missing；`test/kb.test.ts` + `test/kb-qmd.test.ts`
+6 pass / 3 skip（qmd 未安装，skip-if-absent）/ 0 fail；`test/wren.test.ts` 10 skip
+（WREN_BIN 未指向本机 venv）。
+
+## 41. Docker 环境复核（M35）——kb/wren/qmd 全落地后的镜像梳理
+
+§35 的"1.65GB"叙事写于 KB/Wren 增强层落地之前；本节是增强层齐备后的全量复核：
+Dockerfile / docker-compose / entrypoint / .env.example / .dockerignore / README / SOP /
+docker-smoke 八处逐一对照 `src/`（kb、wren、qmd、agent-compose、mcp-registry、proc、daemon）与
+DESIGN §32–§40 的契约，修正 10 处，并实测定位一个镜像瘦身的地雷（§41.3）。
+
+### 41.1 镜像层构成实测（全量 4.32GB，增强层默认全烘）
+
+| 层 | 体积 | 内容 |
+|---|---:|---|
+| pip 层（runtime 3/17） | 988MB | pymupdf + minio（KB 出图）+ wrenai[mcp,postgres,clickhouse] |
+| qmd 层（runtime 12/17） | 907MB | bun 全局 @tobilu/qmd + @node-llama-cpp 多平台预编译 662MB + tree-sitter 69MB |
+| node_modules | 392MB | 网关生产依赖（pi-* SDK 为主） |
+| node 22 / bun | 122 / 107MB | npm 生态 MCP / 网关运行时 |
+| conda（两段） | 453MB | python 3.14 + conda/pip |
+| debian + runtime apt | ~106MB | git/jq/tini/procps 等 |
+
+### 41.2 修正清单（10 项）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| 1 | `.dockerignore` 缺 `.mimosa`（安全扫描产物进构建上下文） | 补录 |
+| 2 | 层序重排时 `COPY docker/qmd-patch` 被整段丢掉 | 构建期 `MODULE_NOT_FOUND` 当场暴露；教训：重排层必须整链复读，不能只看插入点 |
+| 3 | qmd 层（907MB，重下载）排在应用 COPY **之后**——src 一变，BuildKit 缓存链断裂，每次提交重拉 0.9GB | 前置到 USER omp 之后、应用 COPY 之前（§41.4） |
+| 4 | 文档里"可裁 ~700MB"只是注释里的手动方案，没有开关 | 落成 `QMD_SLIM` / `WREN_EXTRAS` build-arg，compose 透传（§41.3 / Dockerfile） |
+| 5 | compose 与 Dockerfile 各写一份 healthcheck（必然漂移） | 删 compose 侧，注释指向 Dockerfile |
+| 6 | compose 缺调优 env 透传（`GATEWAY_SESSION_IDLE_TTL_MS` / `STREAM_*` / `OTEL` / `CORS_ORIGINS`） | 补 passthrough（留空=代码内置值） |
+| 7 | 构建期 `NPM_REGISTRY` 与运行期 `NPM_CONFIG_REGISTRY` 要配两次 | compose 插值回退：`NPM_REGISTRY: "${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-}}"` |
+| 8 | `.env.example` 两处宿主路径写旧值 `./kb/wren`（实际 `./global/wren`）；缺 `WORKSPACE_ROOT` 说明；NPM 变量双角色未注明 | 逐一修正 |
+| 9 | README / SOP 体积叙事停在"1.65GB"，KB/Wren 增强层未计入 | 更新为"基础 1.65GB + 增强层 ≈4.3GB + 瘦身开关"分层叙事 |
+| 10 | docker-smoke 未覆盖新管理面 | 补 `GET /admin/kb`、`GET /admin/wren/datasources`、无 X-Admin-Id → 403 门禁三项 |
+
+### 41.3 bun install cache 硬链接坑——"同层 rm 不减层体积"的真因（实测）
+
+QMD_SLIM 最初写成"安装后同层 `rm -rf node_modules/@node-llama-cpp/<多平台目录>`"，结果：
+容器文件系统里目录确实没了，但 `docker history` / `docker save` / `docker system df` 全部仍报 907MB。
+
+排查排除法：
+
+1. **不是 overlayfs 白名单问题**（§35.5 铁律在同层成立）：最小实验 `dd 100MB + 同层 rm`
+   在同一引擎上 327MB → 118MB，同层 rm 机制本身有效。
+2. **不是 rm 没执行**：`docker run` 进 slim 镜像 `ls`，多平台目录确已消失。
+3. **真因：硬链接**。`bun install -g` 把包文件**硬链接**进 `$BUN_INSTALL/install/cache`
+   （实测 863MB；`stat -c '%i %h'` 对比 node_modules 与 cache 侧同一文件：同 inode、`links=2`）。
+   层 diff 按**路径**记录文件——node_modules 侧的目录项删了，数据仍被同层 cache 路径引用，
+   层体积纹丝不动。
+
+修复：QMD_SLIM 分支同层连 `install/cache` 一起删 → **qmd 层 907MB → 156MB，
+镜像总量 4.32GB → 3.21GB（-26%）**。
+
+附带两个小坑：glob `tree-sitter-*` 漏掉 `web-tree-sitter`（改用 `find -name '*tree-sitter*'`）；
+硬链接计数会让容器内 `du` 低估层内真实数据量（验证体积要看 `docker history` 的层尺寸，不能只看 `du`）。
+
+推论：**凡是硬链接型包管理器（bun / pnpm）在镜像层内安装后做裁剪，rm 必须包含其 cache 目录**；
+`pnpm` 的 store 同理。§35.5 的"同层 rm"铁律补上这条边界。
+
+### 41.4 层序规则（M35 新增）
+
+BuildKit 缓存按层链失效：排在前面的层不变，后面的层才可能命中缓存。据此分两类：
+
+- **重下载层**（apt / bun install / pip / qmd 全局装）：依赖面越窄越好、**尽量前置**——
+  qmd 层现在只依赖 bun 二进制 + qmd-patch，src/package.json 每天变也不触发重拉。
+- **应用 COPY 层**（node_modules/src/scripts/package.json）：高频变更、零下载成本，**放最后**——
+  变更时只重跑本地拷贝（秒级）。
+
+代价：qmd-patch 变更会使后面的应用 COPY 全部重跑——本地拷贝秒级，远比重拉 0.9GB 便宜。
+
+### 41.5 验证（M35）
+
+- 全量镜像构建 EXIT 0（清华 pip 源 + npmmirror）；`bun run typecheck` 0 error；`bun test test/unit` 121 pass / 0 fail。
+- 容器验收 **18/18**（docker-smoke：健康/会话/注入/bootstrap/文件/openapi 214 操作/**KB·Wren 挂载与 403 门禁**/导出导入往返）。
+- QMD_SLIM=1 变体：qmd 2.8.3 + patch 产物 + python(pymupdf/minio) + wrenai 0.18.0 全部就位，
+  tree-sitter 与多平台 llama 预编译消失，cache 目录清空；层 156MB。
+- 四套运行时登录 shell 可达：python 3.14.7 / node 22.14.0 / bun 1.4.4 / uv 0.13.8；entrypoint 日志仅预期告警（MinIO 未配置）。
+
+### 41.6 KB 检索策略修订：omp 路由的 grep × qmd 双路组合（M35）
+
+部署方反馈：KB 的检索不该是"qmd 优先、grep 兜底"，而应**由 omp（agent）按问题形态判断**、
+把两条路组合使用。落实在 skill 模板层（`core/kb/skill.ts`），不改任何网关代码路径：
+
+- **事实核查**：omp 的 grep 工具 import 自 `@oh-my-pi/pi-natives`（原生 ripgrep 引擎，
+  结果字段含 `ripgrepTruncated`）——**不依赖系统 `rg` 二进制**（镜像实测 `command -v rg` 为空），
+  会话内开箱即用，镜像无需加包。
+- **SKILL.md**：description 与检索流程第 1 步改为"路由 + 定位"——词面可预测（寄存器/参数名、
+  命令、缩写、错误串、表格编号）→ grep 工具；语义/换说法（自然语言描述、因果/流程类）→ qmd；
+  拿不准 → 双路并行。判断权显式交给 agent。
+- **references/retrieval.md**：重写为「双路对照表 → 路由判断 → 三种组合套路
+  （A：qmd 定域→grep 定行 / B：grep 破冰→qmd 扩面 / C：双路并行）→ grep 工具参数面
+  （pattern/path/case/gitignore/skip）→ qmd MCP/CLI → 无响应处置 → 迭代准则」。
+- **改口 M29**：§38.6 标题与三级策略同步改写（"grep 兜底"表述全文退役，见 §38.6/§38.9/§38.12/
+  .env.example）；降级链语义不变（qmd MCP → CLI → 纯 grep，能力不缺只是没有增强排名）。
+- 修订动机：单文档知识库里 qmd 通常只返回**文档级**一条结果，行号始终靠 grep——把 grep 降级为
+  兜底会诱导 agent 在词面秒答的场景先绕道 qmd。
+- 存量 KB 经 `refreshAllKbSkills()`（启动时）与入库后 `refreshKbSkillMd()` 自动升级到新模板；
+  单测 `test/unit/kb.test.ts` 新增 5 条断言锁住路由语义（含"兜底：grep"表述退役）。
+
+### 41.7 会话工具面收敛（M35）——内网无 GUI 部署关闭联网/浏览器类工具
+
+目标部署环境是**内网 Linux 无 GUI**：omp 默认开启的联网类工具（web_search、read 的 URL
+抓取）与浏览器/桌面类工具（browser/computer）在内网里要么不可用（请求挂到超时）、要么
+引入无意义的攻击面。收敛机制走 omp 原生设置系统，网关只做注入：
+
+- **事实核查**：omp 设置从 `<cwd>/.omp/settings.json`（project 层）等位置加载；网关建会话时
+  `options.cwd = workspaceDir`（session-assembly.ts buildCreateOptions）→ project 层即
+  `<workspace>/.omp/settings.json`。相关设置键（pi-coding-agent 设置注册表）：
+  `fetch.enabled`（read 抓 URL，默认 true）、`web_search.enabled`（默认 true）、
+  `browser.enabled`（默认 true + 内核检测）、`computer.enabled`（默认 false + 驱动检测）。
+- **注入点**：`prepareWorkspace` 合成序列末尾新增 `composeSessionSettingsForWorkspace`——
+  env `OMP_SESSION_SETTINGS_JSON`（部署方 JSON 对象）→ 写 `<workspace>/.omp/settings.json`。
+  语义：env 未设不写（omp 默认，本地开发零影响）；键浅合并、部署键优先（fork 拷贝来源若带
+  settings，部署收敛键赢）；坏 JSON 告警跳过不阻塞建会话（fail-open）；内容一致不落盘。
+- **入口**：compose 透传 `OMP_SESSION_SETTINGS_JSON`；.env.example 给内网推荐值
+  （四个键全 false）。只影响**新建会话**，存量 workspace 不回溯改写。
+- **为什么不用其他通道**：entrypoint 环境变量做不到（omp 设置不读这类 env 的这些键）；
+  全局 agent 定义可以关工具但会与用户级 agent 合成语义纠缠；project 层 settings 是 omp
+  文档化的标准面，且作用域天然等于"这一个会话"。
+- 单测 `test/unit/session-settings.test.ts` 6 项（未设不写/写入/合并/坏 JSON/非对象/不落盘）。
+
+### 41.8 git 本地面（M35）——omp 生成物纯本地，容器 git 开箱即用
+
+部署方确认：omp 生成的代码保存在容器挂载卷里，**不推远端**。据此先厘清责任边界，再补容器缺口：
+
+- **omp 会话状态管理不依赖 git**：checkpoint/rewind 是会话树分支机制（`CheckpointState` =
+  内存消息数 + session entry ID，见 pi-coding-agent checkpoint.ts）——"omp 自带 git 管理"
+  实为会话树快照，git 二进制不参与。
+- **git 的容器角色**：agent 在会话内对 workspace 做本地版本管理（init/add/保存点/历史）。
+  镜像已带 git + openssh-client（§35.7"workspace 的 git 面"），无需再加工具；缺口在配置：
+  1. **身份**：镜像零 git 配置，无身份时本地保存点报 "Please tell me who you are"——
+     entrypoint 写 `$HOME/.gitconfig` 默认身份 `omp-session <omp-session@localhost>`，
+     部署侧 `GIT_USER_NAME`/`GIT_USER_EMAIL` 覆盖；
+  2. **safe.directory**：/workspace 是 777 bind mount，宿主 uid ≠ 容器 1000 时 git 以
+     dubious ownership 拒绝操作——默认 `[safe] directory = *` 放行（`GIT_SAFE_DIRECTORY=0`
+     关闭）。放行边界：该文件属主即容器用户（600），容器内无提权面，不扩大攻击面；
+  3. `init.defaultBranch = main`（消除 hint 噪音）。
+- **远端不在默认范围**：git+ssh 工具链（openssh-client）在镜像内但默认无 remote——需要远端
+  的会话自行配置。`~/.gitconfig` 每次容器启动由 entrypoint 重写（部署侧配置为准）。
+- compose 透传 `GIT_USER_NAME` / `GIT_USER_EMAIL` / `GIT_SAFE_DIRECTORY`；SOP §1.6 有验证方法。
+
+### 41.9 TUI 终端桥（M35）——浏览器 xterm ⇄ WS ⇄ PTY ⇄ omp 原生 TUI
+
+需求：内网部署在前端直接打开 omp 原生 TUI 做交互测试（真实 pi-tui 渲染，非模拟界面）。
+
+- **前提修复（镜像）**：`dist/cli.js` 顶层静态 import `puppeteer-core/internal/util/Function.js`
+  （其余 puppeteer 引用均为动态 import）——M24 瘦身删除 puppeteer 家族后，omp CLI 在容器内
+  直接 `MODULE_NOT_FOUND`，TUI/ RPC/legacy 兼容路径全废（实测踩到）。恢复 puppeteer-core
+  家族五个包（约 +20MB），React 系仍保持裁剪（TUI 不依赖）。
+- **通道**：`GET /terminal` 测试页（xterm.js，vendor 依赖 `@xterm/xterm`+`@xterm/addon-fit`，
+  ops 面无凭据）→ `GET /terminal/ws/:sid` WS 升级（hono/bun `upgradeWebSocket` +
+  `Bun.serve({websocket})` handler）→ pi-natives `PtySession`（PTY 原语，pi-tui 要求
+  stdin/stdout 均为 TTY）→ `bun dist/cli.js --session-dir <users/<uid>/sessions>
+  --session <ompSessionId>`。
+- **会话共享模型**（v2，正确性核心）：omp TUI 无运行时 reload——TUI→网关方向的自动感知
+  做不到，故采用**共享观察**而非互斥交接：
+  - **读面共享**：TUI 打开时网关 ctx **保持 live**（不 dispose）；tail 循环（500ms 轮询
+    stat.size）读同一 JSONL 增量，按行解析 entry → publish `tui.entry` 事件（进 SSE 实时流
+    + 回放缓冲，REPLAYABLE 白名单）——前端页面**实时镜像 TUI 里的对话**；
+  - **写面互斥**：TUI 是该 JSONL 的活跃写者，网关侧新 turn 会与其内存 leaf 分叉——
+    `withTurnSlot` 入口 + prompt 路由（模型预检**之前**，否则无凭据部署先报
+    MODEL_UNAVAILABLE 误导——实测踩到）统一 409 `TUI_ACTIVE`；TUI 关闭自动解除；
+  - **关闭吸收**：TUI 退出/页面关闭 → 停 tail → `disposeSession(ctx)` → 下次访问
+    getOrRevive 从文件重建（含 TUI 期间写入的全部条目）；
+  - 空会话（JSONL 未落盘，`SessionManager.create` 是内存态）：onOpen 物化最小 header
+    （`CURRENT_SESSION_VERSION` 运行时导入；缺 title 行，open 兼容 §25 导入语义）；
+  - 第二个终端 / 占用期复活（网关重启等防御位）仍 409 `TUI_ACTIVE`。
+- **公网隧道实测坑位（frp-panel，47.94.164.232:10005 端到端验收通过）**：
+  1. **页面 JS 的 WS URL 少冒号**：模板串写成 `${proto}//${host}` → `ws//host` 非法 URL。
+     冒烟全用 bun 客户端直连构造 URL、不走页面 JS，故未暴露——页面级改动必须过浏览器 console；
+  2. **frp 链路半开 → 僵尸占用**：对端断开时 close 帧经隧道丢失，网关侧占用标记不 clearing，
+     新连接全部 409——guard 对占用的 WS 发空帧探活（`send` throw = 僵尸）→ 自动清理放行（自愈）；
+  3. **诊断基建**：guard 所有拒绝分支带日志（404 分支曾无日志，探针 uid 错位时表现为
+     "升级机制坏"的误判，排查多绕一圈）；
+  4. **页面 `Cache-Control: no-store`**：旧页面缓存会让新功能（预填/自动连接）"不生效"；
+  5. **`docker restart` 不替换容器文件系统**——更新页面/代码必须 `compose up -d`（recreate）。
+- **omp 会话 id 来源**：live ctx 的 `ompSessionId`（= `sessionManager.getSessionId()`）；
+  会话已被回收时从 JSONL 头行解析（首条记录携带 id）。
+- **agentDir**：CLI 无 `--agent-dir` 主 flag，读 env `PI_CODING_AGENT_DIR`（SDK 同款通道）
+  → 注入用户 agentDir，TUI 使用同一份 models.yml/凭据。
+- **鉴权**：挂根应用（不经 /api authMiddleware——浏览器 WS 无法带 header）；
+  `Authorization` header 优先（BFF 代理场景），`?token=&uid=` 回落（浏览器直连），
+  同一套恒时校验（tokenAccepted 导出复用）。
+- **协议**：client→server：binary 帧=原始键入，text 帧=JSON 控制帧
+  （`{"type":"input","data":..}` / `{"type":"resize","cols":..,"rows":..}`）；
+  server→client：PTY 输出原样转发 + `{"type":"exit","code":..}` 终止帧。
+  页面关闭 = `pty.kill()`（TUI 退出，内容已在 JSONL）。
+- 单测 `test/unit/terminal.test.ts` 5 项（spawn 参数/env 继承/JSONL id 解析/守卫语义）。

@@ -91,7 +91,7 @@
 | `INVALID_RANGE` | 400 | Range 头非法/不可满足（文件下载） |
 | `PATH_FORBIDDEN` | 403/400 | 路径穿越/越出 workspace（三重守卫） |
 | `IS_DIRECTORY` | 400 | 对目录执行文件操作 |
-| `FILE_TOO_LARGE` | 413 | 单文件超限（读 25MB / 写 5MB / 插件 2MB） |
+| `FILE_TOO_LARGE` | 413 | 单文件超限（文本读 2MB / 写 5MB / raw 流 25MB / 插件 2MB） |
 | `PAYLOAD_TOO_LARGE` | 413 | 请求体超 `GATEWAY_BODY_LIMIT_MB`（默认 20MB）或配置文本超限 |
 | `YAML_UNAVAILABLE` | 500 | 运行时缺少 `Bun.YAML`（网关要求 Bun >= 1.2） |
 | `SNAPSHOT_EMPTY` | 409 | 零 turn 会话无可快照内容 |
@@ -106,7 +106,23 @@
 | `SCHEMA_VERSION_MISMATCH` | 400 | DB schema 版本高于当前网关支持（import 与 boot 双向检查） |
 | `GATEWAY_NOT_DRAINED` | 409 | export/import 要求实例已 drain 且无活跃会话 |
 | `BUNDLE_INCOMPLETE` | 400 | bundle 内容不完整（db sha256 或文件计数对账失败） |
+| `INVALID_SLUG` | 400 | KB slug 不合规（`^[a-z0-9][a-z0-9-]{0,63}$`，DESIGN §38.2） |
+| `INVALID_DOC_NAME` | 400 | KB 文档名清洗后仍不合规（zip 词干/zip 内路径越界，`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`） |
+| `INVALID_ZIP` | 400 | KB 上传 zip 非法（非 zip / 缺 markdown.md 等 MinerU default 档位产物 / group 段不合规） |
+| `KB_NOT_FOUND` | 404 | KB（`kb-<slug>`）不存在或无 kb.json 管理标记 |
+| `DOC_NOT_FOUND` | 404 | KB 内文档不存在（tree/pdf/删除等按文档名的端点） |
 | `INTERNAL` | 500 | 未预期错误（记录日志；带 X-Request-Id 报障） |
+
+## 集成与运维（此前路由在用但未登记，v1.3 补齐）
+
+| code | status | 含义 |
+|---|---|---|
+| `INPUT_BLOCKED` | 403 | 输入被集成端 input 钩子拦截（`POST /:sid/prompt` 准入前） |
+| `INJECT_FAILED` | 409 | 集成端上下文注入失败（`POST /:sid/inject`） |
+| `BUSINESS_EVENT_INJECT_FAILED` | 409 | 业务事件已登记但上下文注入失败（事件不回滚） |
+| `MCP_RECONNECT_FAILED` | 409 | MCP 单服务器重连失败 |
+| `EXPORT_FAILED` | 500 | 导出 bundle 失败（`/admin/maintenance/export`） |
+| `IMPORT_FAILED` | 500 | 导入 bundle 失败（`/admin/maintenance/import`） |
 
 ## SSE 传输层错误（event: error）
 
@@ -121,6 +137,11 @@ SSE 建连后若会话不可用，以 `event: error` 帧返回（不是 HTTP 状
 
 ## 变更记录
 
+- v1.3（2026-11-18）：code review 对账——补登 6 个路由在用但未记录的码（`INPUT_BLOCKED`/
+  `INJECT_FAILED`/`BUSINESS_EVENT_INJECT_FAILED`/`MCP_RECONNECT_FAILED`/`EXPORT_FAILED`/`IMPORT_FAILED`），
+  并补齐 openapi.ts `GATEWAY_ERROR_CODES` 投影中缺登的既有码。
+- v1.2（2026-11-17）：新增知识库（KB）模块错误码（`INVALID_SLUG`/`INVALID_DOC_NAME`/`INVALID_ZIP`/
+  `KB_NOT_FOUND`/`DOC_NOT_FOUND`，DESIGN §38；`ALREADY_EXISTS` 沿用既有行）。
 - v1.1（2026-11-15）：新增结构化配置错误码（`INVALID_CONFIG`/`INVALID_PROVIDER`/`INVALID_AGENT`/
   `INVALID_FRONTMATTER`/`INVALID_YAML`/`YAML_UNAVAILABLE`，DESIGN §30）。
 - v1（2026-11-15）：从 M1-M11 实现全量反推；与 `src/routes/*.ts` 的 `jsonError` 调用一一对应。

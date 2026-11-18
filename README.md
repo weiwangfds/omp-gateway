@@ -12,9 +12,9 @@ omp gateway（本仓库：Bun + Hono + omp SDK）
    └─ 进程内 AgentSession × N（每会话私有 AgentRegistry）
 ```
 
-- 设计与全部语义：[`docs/DESIGN.md`](docs/DESIGN.md)（§1 定位 / §5 快照 / §6 事件契约 / §18 管理权限）
+- 设计与全部语义：[`docs/DESIGN.md`](docs/DESIGN.md)（§1 定位 / §5 快照 / §6 事件契约 / §18 管理权限 / §41.9 TUI 终端桥）
 - **运维手册（SOP）**：[`docs/SOP.md`](docs/SOP.md)（部署 / 接入 / 日常运维 / 故障速查 / 环境迁移 / 任务手册 / 发布检查表）
-- **端点索引**：[`docs/endpoint-index.md`](docs/endpoint-index.md)（193 个操作，按 13 个领域分组，含查询参数；由 openapi 派生）
+- **端点索引**：[`docs/endpoint-index.md`](docs/endpoint-index.md)（214 个操作，按 13 个领域分组，含查询参数；由 openapi 派生）
 - 机器可读契约：运行时 `GET /openapi.json`（OpenAPI 3.1：操作级摘要 + 请求体 + 错误码 + 43 个响应模型 + `x-gateway-coverage` 覆盖率自省）；事件：[`contracts/gateway-events.v1.schema.json`](contracts/gateway-events.v1.schema.json)
 - 测试：`cd gateway && bun run test`（28 个文件串行，约 296 项：离线全量 + 真实模型 e2e 自动跳过/执行）
 
@@ -23,7 +23,9 @@ omp gateway（本仓库：Bun + Hono + omp SDK）
 ### Docker（推荐）
 
 镜像内置 Bun（网关）+ Node 22/npm + Conda（python 3.14）+ uv/uvx 四套运行时，
-**三阶段构建，体积 1.65GB**（首版单阶段 3.86GB，见 DESIGN §35）；
+**三阶段构建**：基础运行时 1.65GB（首版单阶段 3.86GB，见 DESIGN §35），
+叠加 KB 检索（qmd ≈0.9GB）与 Wren 语义层（wrenai ≈1.0GB）后全量 ≈4.3GB；
+内网/瘦身场景可用构建开关 `QMD_SLIM=1`（实测 4.32→3.21GB）与 `WREN_EXTRAS`（按需裁数据源驱动），见 DESIGN §41；
 Base 为 debian-slim + 固定 sha256 的 Miniconda 安装包（与官方镜像同一份，conda 26.7 / python 3.14）；
 **工作区根目录由宿主机挂载进容器**，会话产出与状态都在挂载卷里，宿主机可直接读写
 （根目录固定 777，容器内新建文件默认 666/777，`OMP_UMASK` 可收紧；凭证目录仍是 700，见 DESIGN §37）。
@@ -32,6 +34,7 @@ Base 为 debian-slim + 固定 sha256 的 Miniconda 安装包（与官方镜像�
 cd gateway && docker build -t omp-gateway:latest .
 WORKSPACE_ROOT=/srv/omp-workspace GATEWAY_SERVICE_TOKENS=change-me \
   docker compose up -d
+# 验收：docker run -d -p 8877:8787 ... 后跑 bun run smoke:docker（脚本 BASE 硬编码 127.0.0.1:8877）
 ```
 
 > **内网部署**（只有 conda / pip / npm 镜像，uv 公网出不去）：启动时用
@@ -127,8 +130,8 @@ gateway/          # 网关（本 README 的主体）
   test/           # 单元 + 集成 + e2e（聊天/编码/SDK 能力/全旅程/审批/控制台/迁移）
   Dockerfile      # 三阶段构建（debian-slim + Miniconda / builder / runtime）；工作区根目录挂载点 /workspace
 contracts/        # 事件契约 schema + 前端映射契约 + 集成指南 + 错误码
-docs/DESIGN.md    # 设计定稿（33 节；§31 结构拆分 / §32 环境迁移）
+docs/DESIGN.md    # 设计定稿（41 节；§38 知识库 / §39 数据查询 / §41 Docker 复核）
 docs/SOP.md       # 运维手册（部署 / 接入 / 运维 / 迁移 / 排障 / 任务手册）
-docs/endpoint-index.md # 端点索引（193 个操作，由 openapi 派生）
+docs/endpoint-index.md # 端点索引（214 个操作，由 openapi 派生）
 docker-compose.yml# 工作区根目录挂载 + 限额与备份参数
 ```

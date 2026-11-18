@@ -3,7 +3,7 @@
 > 由运行时 `GET /openapi.json` 派生（`bun run scripts/gen-endpoint-index.mjs` 重新生成）。
 > 语义细节见 [SOP.md](./SOP.md) 与 [DESIGN.md](./DESIGN.md)。
 
-共 193 个操作，13 个分组。
+共 218 个操作，13 个分组。
 
 ## session-core
 
@@ -39,6 +39,9 @@
 | `POST` | `/api/sessions/import` | 导入会话 JSONL：校验 → 补 model_change → 写文件与 DB 行 | — |
 | `GET` | `/api/sessions/search` | 会话正文搜索：扫该用户 JSONL 命中行并回 snippet | `q`, `limit`, `maxFiles` |
 | `POST` | `/api/sessions/validate` | 会话 JSONL 干跑校验（不落库） | — |
+| `GET` | `/terminal` | TUI 测试页（浏览器 xterm 前端；sid 经 query 传入） | — |
+| `GET` | `/terminal/assets/{file}` | TUI 测试页静态资产（xterm.js/css/fit，白名单直读） | — |
+| `GET` | `/terminal/ws/{sid}` | TUI 终端桥 WebSocket 升级（token 可经 query；握手即交接会话写权） | — |
 
 ## session-observe
 
@@ -267,6 +270,10 @@ Agent Hub：名册/定义/transcript/chat/kill/revive
 
 | 方法 | 路径 | 说明 | 查询参数 |
 |---|---|---|---|
+| `GET` | `/admin/global/agents` | 全局 agent 定义清单（所有用户可见，用户同名覆盖） | — |
+| `DELETE` | `/admin/global/agents/{name}` | 删除全局 agent 定义（新会话不再合成） | — |
+| `GET` | `/admin/global/agents/{name}` | 全局 agent 定义原文；format=json 返回规范字段 + frontmatter | `format` |
+| `PUT` | `/admin/global/agents/{name}` | 写全局 agent 定义（合成进各用户新会话 workspace 的 .omp/agents） | — |
 | `GET` | `/admin/global/mcp` | 全局 MCP 配置 | — |
 | `PUT` | `/admin/global/mcp` | 写全局 MCP 配置（合成进各用户 workspace） | — |
 | `GET` | `/admin/global/plugins` | 全局插件清单 | — |
@@ -277,6 +284,23 @@ Agent Hub：名册/定义/transcript/chat/kill/revive
 | `DELETE` | `/admin/global/skills/{name}` | 删除全局技能 | — |
 | `GET` | `/admin/global/skills/{name}` | 读取全局技能原文 | — |
 | `PUT` | `/admin/global/skills/{name}` | 写全局技能（所有用户可见） | — |
+| `GET` | `/admin/kb` | 知识库列表：扫 global/skills/kb-*（kb.json 标记），含 docs 计数 | — |
+| `POST` | `/admin/kb` | 建知识库：skill 目录骨架（SKILL.md/kb.json/docs/scripts/assets）+ kb.db | — |
+| `DELETE` | `/admin/kb/{slug}` | 删知识库：整个 skill 目录 + kb.db（含 -wal/-shm）；workspace 残留 junction 由下次合成清理 | — |
+| `DELETE` | `/admin/kb/{slug}/doc/{doc}` | 删文档：目录 + kb.db 行联动 | — |
+| `GET` | `/admin/kb/{slug}/index-status` | 语义索引状态：update（BM25）在上传响应内已同步完成，embed（向量）后台单飞异步；?probe=1 额外读 qmd status 的待嵌入数 | — |
+| `POST` | `/admin/kb/{slug}/pdf` | 补传原始 PDF：写 docs/<doc>/source.pdf 并置 has_pdf=1（截图脚本依赖） | — |
+| `GET` | `/admin/kb/{slug}/pdf/{doc}` | 取文档原始 PDF（application/pdf） | — |
+| `GET` | `/admin/kb/{slug}/tree` | 分组树 + 文档卡片（pages/images/has_pdf/md_sha256；未分组文档挂根部） | — |
+| `POST` | `/admin/kb/{slug}/upload` | 上传 MinerU ParseOutcome zip（一包一文档）：透传落 docs/<doc>/，markdown.md 改名 <doc>.md，同名重传覆盖 | — |
+| `GET` | `/admin/wren/datasources` | Wren 数据源列表：state/daemon 端口与存活/models 数/updatedAt（connection 已脱敏） | — |
+| `DELETE` | `/admin/wren/datasources/{name}` | 删除 Wren 数据源：杀 daemon → mcp.json 移除 → 项目目录删除 → 注册表移除（profiles.yml 残留无害） | — |
+| `GET` | `/admin/wren/datasources/{name}` | 单个 Wren 数据源详情（connection 脱敏，password 恒为 ******） | — |
+| `PUT` | `/admin/wren/datasources/{name}` | 创建/更新 Wren 数据源（合并 connection/tables）→ 全量 re-provision（内省生成 MDL + context build + daemon 重启）；201 创建 / 200 更新 | — |
+| `POST` | `/admin/wren/datasources/{name}/rebuild` | 重内省 + 重生成 models + context build + daemon 重启（enrich 后同步语义层） | — |
+| `POST` | `/admin/wren/datasources/{name}/sync` | 按 drift 增量同步单数据源：catalogHash 有变化才增量重生成（保留 agent enrich）→ build → 重启 daemon；{"force":true} 跳过短路 | — |
+| `POST` | `/admin/wren/datasources/{name}/test` | 连接测试（PG SELECT 1 / CH 内省 LIMIT 1；body 可给未落库载荷），不落注册表 | — |
+| `POST` | `/admin/wren/sync` | 全量 drift 同步：遍历注册表逐个按 catalogHash 增量同步（单个失败不中断），返回每源 {changed,reason,models} | — |
 
 ## ops
 

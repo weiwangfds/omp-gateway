@@ -43,9 +43,11 @@ curl -s -X POST $BASE/api/sessions/$SID/prompt \
 Python 版本管理）。工作区根目录由宿主机挂载进容器，容器内的会话产出与状态都落在挂载卷里，
 宿主机可直接读写。
 
-镜像为**三阶段构建，体积 1.65GB**（首版单阶段 3.86GB，逐步处置见 DESIGN §35）：构建期工具链、
+镜像为**三阶段构建**（首版单阶段 3.86GB → 基础运行时 1.65GB，逐步处置见 DESIGN §35）：构建期工具链、
 bun 下载缓存、devDependencies、omp 交互式 TUI/浏览器前端依赖、conda 的调试符号与文档、
 类型声明都不进最终镜像；构建阶段会跑 `bun run typecheck`，类型错误在 `docker build` 时就暴露。
+KB 检索（qmd ≈0.9GB）与 Wren 语义层（wrenai ≈1.0GB）烘在增强层，全量 ≈4.3GB；
+瘦身开关 `QMD_SLIM=1`（实测 4.32→3.21GB）/ `WREN_EXTRAS` 见 DESIGN §41 与 gateway/Dockerfile。
 
 ```bash
 cd gateway && docker build -t omp-gateway:latest .
@@ -183,6 +185,46 @@ docker exec omp-gateway bash -lc '
 3. **镜像本身怎么进内网**：`Dockerfile` 构建要拉 debian / bun / node / miniconda，内网一般拉不到。
    在有网机器上 `docker build` 后 `docker save omp-gateway:latest | gzip > omp-gateway.tar.gz`，
    内网 `docker load` 即可；只在有网机器上装一次，之后升级同样走 tar。
+
+### 1.5 内网工具面收敛：关闭联网/浏览器类工具（DESIGN §41.7）
+
+内网无 GUI 环境里，omp 默认开启的联网类工具（web_search、read 的 URL 抓取）与浏览器/桌面类
+工具（browser/computer）要么不可用、要么是无意义的暴露面。在 `.env` 配一行，网关建每个新
+会话时把它写进该会话的 `.omp/settings.json`（omp project 层设置）：
+
+```bash
+OMP_SESSION_SETTINGS_JSON={"fetch.enabled":false,"web_search.enabled":false,"browser.enabled":false,"computer.enabled":false}
+```
+
+- 留空 = 不写 settings，走 omp 默认（本地开发不受影响）；
+- 只影响**新建会话**，已有 workspace 不回溯改写；
+- 键是 omp 设置 id（`fetch.enabled` / `web_search.enabled` / `browser.enabled` /
+  `computer.enabled` 等），其他任意设置键同样可用；
+- 验证：起容器建一个会话后，`cat <workspace>/users/<uid>/workspaces/<sid>/.omp/settings.json`
+  应为上述内容；会话内让 agent 调 web_search 应被拒绝/不存在。
+
+### 1.6 容器内 git 本地面（DESIGN §41.8）
+
+omp 的 checkpoint/rewind 是会话树机制、不依赖 git；git 只服务会话内的**本地**版本管理
+（omp 生成物保存在挂载卷，不推远端）。entrypoint 已写好默认配置（每次容器启动覆盖）：
+
+| 项 | 默认 | env 覆盖 |
+|---|---|---|
+| 身份 | `omp-session <omp-session@localhost>` | `GIT_USER_NAME` / `GIT_USER_EMAIL` |
+| safe.directory | 通配放行（bind mount 属主 uid 不一致时不再报 dubious ownership） | `GIT_SAFE_DIRECTORY=0` 关闭 |
+| 默认分支 | `main` | — |
+
+验证（容器内）：
+
+```bash
+docker exec omp-gateway bash -lc '
+  git config --global --list                    # 应见 user.name / safe.directory
+  cd /tmp && rm -rf g && mkdir g && cd g && git init -q .
+  touch f && git add f                          # add/status 不需要身份
+'
+```
+
+需要远端（git+ssh）的会话在会话内自行配置 remote 与密钥；openssh-client 已在镜像内。
 
 ## 2. 接入（上游侧）
 

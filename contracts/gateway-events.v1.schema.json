@@ -27,6 +27,7 @@
         "agents.changed",
         "notice",
         "omp.raw",
+        "tui.entry",
         "todo.reminder",
         "todo.cleared",
         "goal.updated",

@@ -354,6 +354,7 @@ Content-Type: application/json
 ```
 
 - `POST /api/me/agents` 创建（`name` 放 body；同名已存在 → 409 `ALREADY_EXISTS`）；PUT 的 name 取自路径，body.name 如给出必须一致。
+- 全局侧：`GET/PUT/DELETE /admin/global/agents[/:name]`（X-Admin-Id，与用户级同构双通道）。全局定义在会话创建时合成进各用户 workspace `.omp/agents/`（用户同名定义跳过合成 = 用户覆盖全局）；`GET /api/me/agents` 清单带 `scope: user|global` 标签。
 - `GET /api/me/agents/:name?format=json` → 规范字段 + `frontmatter` 原对象 + `instructions`。
 - 未建模字段会被 400；需要完全自由格式时用原文通道：
   `{"content": "---\nname: x\ndescription: ...\n---\n..."}`（或 `text/markdown` PUT）。

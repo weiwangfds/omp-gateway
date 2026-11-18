@@ -12,11 +12,21 @@ const proc = Bun.spawn([process.execPath, "run", "src/index.ts"], {
   stderr: "ignore",
 });
 const base = `http://127.0.0.1:${port}`;
+let healthy = false;
 for (let i = 0; i < 60; i++) {
   try {
-    if ((await fetch(`${base}/healthz`)).ok) break;
+    if ((await fetch(`${base}/healthz`)).ok) {
+      healthy = true;
+      break;
+    }
   } catch {}
   await new Promise((r) => setTimeout(r, 300));
+}
+if (!healthy) {
+  // 起不来要立刻报错退出：继续 fetch 只会得到难懂的连接错误，且此前不清理子进程
+  console.error(`gateway failed to start on :${port} within 18s`);
+  proc.kill();
+  process.exit(1);
 }
 const spec = await (await fetch(`${base}/openapi.json`)).json();
 proc.kill();
