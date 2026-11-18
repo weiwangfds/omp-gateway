@@ -49,6 +49,9 @@ export type GatewayEventPayload =
   // ---- v1.3：业务事件（集成端注入 → 关联 turn → 完成回调）----
   | { type: "business.event"; eventId: string; eventType: string; data?: unknown; text: string }
   | { type: "business.completed"; eventId: string; eventType: string; status: "completed"; usage?: unknown }
+  // ---- v1.4：TUI 终端桥（DESIGN §41.9）——前端 TUI 打开期间，网关 tail 同一 JSONL，
+  // 把 omp TUI 进程写入的新条目镜像给 SSE 订阅者（entry 形状 = omp 会话 JSONL 条目）
+  | { type: "tui.entry"; entry: unknown }
   | { type: "omp.raw"; omp: unknown };
 
 /** 业务事件关联标识：挂在事件信封上，集成端据此把 agent 响应归因到自己的业务事件。 */

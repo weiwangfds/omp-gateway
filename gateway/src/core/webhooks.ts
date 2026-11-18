@@ -28,10 +28,6 @@ const hookCache = new Map<
 const HOOK_TTL_MS = 10_000;
 
 /**
- * 事件分发入口（SessionCtx.publish fire-and-forget 调用）。
- * 订阅集合带 10s 缓存；每次投递失败重试一次（2s 后）；函数永不抛错。
- */
-/**
  * 事件分发入口（SessionCtx.publish fire-and-forget 调用）。订阅集合带 10s 缓存；
  * 每次投递失败重试一次（2s 后）；函数永不抛错。
  */
@@ -41,12 +37,18 @@ export async function dispatchWebhookEvent(userId: string, sessionId: string, ev
   const cacheKey = `${userId}\0${sessionId}`;
   let cached = hookCache.get(cacheKey);
   if (!cached || Date.now() - cached.at > HOOK_TTL_MS) {
-    const rows = listWebhooksForDispatch(userId, sessionId).map((r) => ({
-      id: r.id,
-      url: r.url,
-      secret: r.secret,
-      events: JSON.parse(r.events_json) as string[],
-    }));
+    if (cached) hookCache.delete(cacheKey); // 过期键即时回收（无淘汰扫描下的最低成本回收）
+    const rows = listWebhooksForDispatch(userId, sessionId)
+      .map((r) => {
+        try {
+          return { id: r.id, url: r.url, secret: r.secret, events: JSON.parse(r.events_json) as string[] };
+        } catch {
+          // 契约承诺本函数永不抛错：单行坏 events_json 只跳过该 hook，
+          // 不让整批投递 reject（旧实现对坏行 unhandled rejection，拖垮该会话所有投递）
+          return null;
+        }
+      })
+      .filter((h): h is NonNullable<typeof h> => h !== null);
     cached = { hooks: rows, at: Date.now() };
     hookCache.set(cacheKey, cached);
   }
@@ -76,7 +78,6 @@ export async function dispatchWebhookEvent(userId: string, sessionId: string, ev
 }
 
 /** 注册/注销回调后失效缓存；不传 sessionId 则清该用户全部键（用户级变更影响所有会话）。 */
-/** 注册/注销回调后失效缓存；不传 sessionId 清该用户全部键（用户级变更影响所有会话）。 */
 export function invalidateHookCache(userId: string, sessionId?: string): void {
   if (sessionId !== undefined) {
     hookCache.delete(`${userId}\0${sessionId}`);

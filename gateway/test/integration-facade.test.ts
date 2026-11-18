@@ -196,7 +196,7 @@ describe("状态聚合与事件回放", () => {
   });
 });
 
-describe("业务事件（DESIGN §22.5）", () => {
+describe("业务事件（DESIGN §22 事件面）", () => {
   test("注入：返回 eventId + business.event 进事件流；不触发 turn 时不耗预算", async () => {
     const r = await fetch(`${BASE}/api/sessions/${sid}/business-events`, {
       method: "POST",

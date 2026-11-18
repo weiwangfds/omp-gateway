@@ -81,12 +81,31 @@ export async function gitStatus(workspaceDir: string): Promise<GitStatus> {
   for (const line of r.stdout.split("\n")) {
     if (line.startsWith("## ")) {
       const noCommits = line.match(/^## No commits yet on (.+)$/);
-      const m = noCommits ?? line.match(/^## ([^.\s]+)(\.{3}(\S+))?(?:\s+\[ahead (\d+), behind (\d+)\])?/);
-      if (m) {
-        branch = m[1];
-        upstream = m[3] ?? null;
-        ahead = Number(m[4] ?? 0);
-        behind = Number(m[5] ?? 0);
+      if (noCommits) {
+        branch = noCommits[1];
+        continue;
+      }
+      // 分支名可含 '.'（v1.2 / release-1.0.x）但不能含 '..'（git refname 限制）——
+      // 不能用排除 '.' 的字符类（旧正则把 release/1.2 截成 release/1），按 '...' 分隔符切分。
+      let body = line.slice(3);
+      let bracket = "";
+      if (body.endsWith("]")) {
+        const bi = body.lastIndexOf(" [");
+        if (bi >= 0) {
+          bracket = body.slice(bi + 2, -1);
+          body = body.slice(0, bi);
+        }
+      }
+      if (body === "HEAD (no branch)") {
+        branch = "HEAD"; // detached HEAD（保留历史行为：报 HEAD 而非 null）
+      } else {
+        const sep = body.indexOf("...");
+        branch = sep >= 0 ? body.slice(0, sep) : body;
+        upstream = sep >= 0 ? body.slice(sep + 3) : null;
+        const aheadM = bracket.match(/^ahead (\d+)/);
+        const behindM = bracket.match(/(?:^|, )behind (\d+)$/);
+        if (aheadM) ahead = Number(aheadM[1]);
+        if (behindM) behind = Number(behindM[1]);
       }
       continue;
     }

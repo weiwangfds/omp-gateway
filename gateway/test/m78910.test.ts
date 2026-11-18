@@ -1,7 +1,7 @@
 /**
  * M7-M10 端点与机制测试（DESIGN §20）：
  * - M7 审批策略（mode+policies+grants+审计三事件）
- * - M8 Agent Hub 收尾（revive/chat 复活路径 409 形状、mcp/reload）
+ * - M8 Agent Hub 收尾（未知 agent 的 chat/kill/revive 一致 404、mcp/reload）
  * - M9 tool.started args 增补
  * - M10 sqlite 备份 + webhook 白名单
  */
@@ -196,7 +196,7 @@ describe("M8：Agent Hub 收尾 + MCP reload", () => {
     }
   });
 
-  test("chat 对非 live 且无 transcript 的 ref → 409 NOT_REVIVABLE", async () => {
+  test("revive 对未注册 agent → 404 NOT_FOUND（非 live 且无 transcript 也不复活）", async () => {
     const created = await (
       await fetch(`${BASE}/api/sessions`, { method: "POST", headers: h("m8u"), body: "{}" })
     ).json();

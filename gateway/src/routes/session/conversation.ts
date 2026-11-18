@@ -6,18 +6,31 @@ import type { Hono } from "hono";
 import { parseImages } from "../../core/images.ts";
 import { StreamQueueTimeout, streamingGate } from "../../core/streaming-gate.ts";
 import { audit } from "../../core/tenant-store.ts";
-import { jsonError, requireLive, withTurnSlot, type SessionEnv } from "./shared.ts";
+import { enforceTurnPolicy, jsonError, requireLive, withTurnSlot, type SessionEnv } from "./shared.ts";
+import { isTuiActive } from "../../core/tui-registry.ts";
 
 /** 对话通道：prompt（202 准许语义）、steer、abort。 */
 export function mountConversationRoutes(app: Hono<SessionEnv>): void {
   app.post("/:sid/prompt", async (c) => {
     const r = await requireLive(c);
     if ("error" in r) return r.error;
+    // TUI 终端占用期写互斥（DESIGN §41.9）：必须在模型预检**之前**——否则无凭据部署
+    // 会先报 MODEL_UNAVAILABLE 而非 TUI_ACTIVE，语义误导（实测踩到）
+    if (isTuiActive(r.row.id)) {
+      return jsonError(c, 409, "TUI_ACTIVE", "TUI terminal is attached; writes are exclusive to the terminal");
+    }
     const body = await c.req.json().catch(() => ({}) as any);
     let text = typeof body?.text === "string" ? body.text : "";
     if (!text) return jsonError(c, 400, "BAD_REQUEST", "body.text is required");
     const images = parseImages(body?.images);
     if (typeof images === "string") return jsonError(c, 400, "BAD_REQUEST", images);
+    // 租户策略（与集成门面同语义，DESIGN §8/§22）：开新 turn 前过预算 402 + RPM 429。
+    // 此前主对话通道漏接——/prompt 可绕过计量（enforceTurnPolicy 在 SDK 桥声明却从未被调用）。
+    const policy = enforceTurnPolicy(c.get("userId"));
+    if (policy) {
+      if (policy.retryAfter) c.header("Retry-After", String(policy.retryAfter));
+      return c.json(policy.body, policy.status);
+    }
     // 集成端 input 钩子（DESIGN §23）：SDK 的 input 事件只在交互式输入路径触发，
     // SDK 嵌入场景由网关在准入前分发——业务可审查/改写/拦截用户输入。
     try {

@@ -127,7 +127,10 @@ export function validateSessionJsonl(text: string): ValidationResult {
   let lastModel: { provider: string; modelId: string } | undefined;
   for (const e of entries) {
     if (e.type === "model_change" && typeof e.model === "string" && e.model.includes("/")) {
-      const [provider, modelId] = e.model.split("/", 2);
+      // JS 的 split("/", 2) 会丢弃分隔符后的剩余段（"a/b/c" 丢 "c"）——只按首个 / 切
+      const slash = e.model.indexOf("/");
+      const provider = e.model.slice(0, slash);
+      const modelId = e.model.slice(slash + 1);
       if (provider && modelId) lastModel = { provider, modelId };
     }
   }

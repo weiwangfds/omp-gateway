@@ -10,7 +10,9 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 /** 启动回收循环（60s 一次）；返回的定时器已 unref，不阻碍进程退出。 */
 export function startIdleCuller(): void {
-  timer = setInterval(cull, 60_000);
+  // cull 是 async：disposeSession 抛错若无 catch 即 unhandledRejection（Bun 默认崩进程），
+  // 与 snapshot-pruner/trash-purger 的 () => void run().catch(...) 兜底保持一致
+  timer = setInterval(() => void cull().catch((err) => console.error("[idle-culler] cull failed:", err)), 60_000);
   timer.unref?.();
 }
 

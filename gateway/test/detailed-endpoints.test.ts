@@ -114,7 +114,7 @@ describe("逐端点详测：ops + openapi", () => {
     expect(events.parameters.some((x: any) => x.name === "types")).toBeTrue();
   });
 
-  test("healthz/readyz：数据根只读故障 → readyz 503", async () => {
+  test("healthz/readyz：正常路径 healthz 200 + readyz ready", async () => {
     expect((await fetch(`${BASE}/healthz`)).status).toBe(200);
     expect((await (await fetch(`${BASE}/readyz`)).json()).ready).toBe(true);
   });

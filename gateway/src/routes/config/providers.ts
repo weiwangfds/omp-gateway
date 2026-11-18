@@ -229,29 +229,26 @@ app.delete("/me/models/providers/:provider", async (c) => {
 /** 结构化配置自描述（DESIGN §30）：字段清单/正则/示例，供前端生成表单。 */
 app.get("/me/config/schema", (c) => c.json(configSchema()));
 
-/** 凭据写入：把 apiKey 合并进 models.yml 的 provider（config-sourced key，已验证隔离）。 */
+/**
+ * 凭据写入：把 apiKey 合并进 models.yml 的 provider（config-sourced key，已验证隔离）。
+ * 走结构化读-改-写（与 PUT /me/models/providers 同一编解码路径）——此前用正则做 YAML
+ * 手术，含 `#`/引号/换行的 key 会破坏文件结构，provider 只校验首字符还会被拼进 RegExp。
+ */
 app.post("/me/models/credentials", async (c) => {
   const uid = c.get("userId");
   const body = await c.req.json().catch(() => null as any);
-  const provider = String(body?.provider ?? "").trim();
-  const apiKey = String(body?.apiKey ?? "");
-  if (!provider || !apiKey)
-    return c.json({ error: { code: "BAD_REQUEST", message: "provider and apiKey required" } }, 400);
-  if (/^[\w-]/.test(provider) === false)
-    return c.json({ error: { code: "BAD_REQUEST", message: "invalid provider id" } }, 400);
-
-  await fs.mkdir(path.dirname(modelsPath(uid)), { recursive: true });
-  let yaml = await fs.readFile(modelsPath(uid), "utf8").catch(() => "providers: {}\n");
-  // 粗粒度合并：无该 provider 段则追加；有则替换其 apiKey 行（若无则插入到 provider 段首）
-  const re = new RegExp(`(\\n  ${provider}:\\n(?:.*\\n)*?\\s*)(apiKey:\\s*.*\\n)`);
-  if (re.test(yaml)) yaml = yaml.replace(re, `$1apiKey: ${apiKey}\n`);
-  else if (new RegExp(`\\n  ${provider}:\\n`).test(yaml))
-    yaml = yaml.replace(new RegExp(`\\n  ${provider}:\\n`), `\n  ${provider}:\n    apiKey: ${apiKey}\n`);
-  else yaml = `${yaml.trimEnd()}\n  ${provider}:\n    apiKey: ${apiKey}\n`;
-  await fs.writeFile(modelsPath(uid), yaml, "utf8");
-  await reloadUserContext(uid);
-  audit("config.credentials", "user", uid, uid, { provider });
-  return c.json({ ok: true, provider });
+  try {
+    const provider = assertProviderId(body?.provider);
+    const apiKey = String(body?.apiKey ?? "");
+    if (!apiKey) return c.json({ error: { code: "BAD_REQUEST", message: "apiKey required" } }, 400);
+    const doc = await readModelsDoc(uid);
+    doc.providers[provider] = { ...(doc.providers[provider] ?? {}), apiKey };
+    await writeModelsDoc(uid, doc);
+    audit("config.credentials", "user", uid, uid, { provider });
+    return c.json({ ok: true, provider });
+  } catch (err) {
+    return respondCodecError(c, err);
+  }
 });
 
 async function readModelsDoc(uid: string): Promise<ModelsConfigDoc> {

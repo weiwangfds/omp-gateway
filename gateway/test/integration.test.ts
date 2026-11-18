@@ -798,7 +798,7 @@ describe("integration: workspace 文件管理 + git + 用量端点", () => {
     await fetch(`${BASE}/api/sessions/${sid}/share-link/${control.id}`, { method: "DELETE", headers: h(uid) });
   });
 
-  test("Agent Hub：名册/单查/transcript/chat 501", async () => {
+  test("Agent Hub：名册/单查/transcript；chat 未知 agent → 404", async () => {
     const roster = await (await fetch(`${BASE}/api/sessions/${sid}/agents`, { headers: h(uid) })).json();
     expect(roster.live).toBe(true);
     expect(Array.isArray(roster.agents)).toBeTrue();
@@ -815,7 +815,7 @@ describe("integration: workspace 文件管理 + git + 用量端点", () => {
         body: '{"text":"x"}',
       })
     ).json();
-    expect(chat.error.code).toBe("NOT_FOUND"); // 未知 agent（chat/kill 已实装，revive 仍 501）
+    expect(chat.error.code).toBe("NOT_FOUND"); // 未知 agent：chat/kill/revive 一致 404（详见 m78910.test.ts）
   });
 
   test("webhooks：注册 → 事件真实投递（HMAC 签名）→ 注销", async () => {
@@ -1057,7 +1057,7 @@ describe("integration: workspace 文件管理 + git + 用量端点", () => {
     expect(schema.properties.type.enum).toContain("agents.changed");
   });
 
-  test("配置资源：me/mcp 与 me/models/config 读写往返 + credentials 注入", async () => {
+  test("compact 报错 / fork(201) / workspace 拷贝 / 归属隔离", async () => {
     const cp = await (
       await fetch(`${BASE}/api/sessions/${sid}/compact`, { method: "POST", headers: h(uid), body: "{}" })
     ).json();

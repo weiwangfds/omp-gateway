@@ -9,12 +9,14 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { config } from "../config.ts";
 import { findShareByToken } from "../core/tenant-store.ts";
 
-const USER_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/** 身份标识格式（X-User-Id / X-Admin-Id / 终端桥 ?uid= 共用）。 */
+export const USER_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest();
 
-/** 恒时比较 token（sha256 定长后 timingSafeEqual），支持双 token 重叠窗口。 */
-function tokenAccepted(presented: string): boolean {
+/** 恒时比较 token（sha256 定长后 timingSafeEqual），支持双 token 重叠窗口。
+ *  导出给终端桥（WS 无法带 header，query token 走同一套校验）。 */
+export function tokenAccepted(presented: string): boolean {
   const hashed = sha256(presented);
   return config.serviceTokens.some((t) => {
     try {

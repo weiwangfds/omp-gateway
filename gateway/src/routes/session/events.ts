@@ -61,10 +61,11 @@ export function mountSessionEventsRoutes(app: Hono<SessionEnv>): void {
         "tool.completed",
         "turn.completed",
         "turn.aborted",
+        "tui.entry", // TUI 镜像条目：断线重连回放，前端不丢 TUI 对话（DESIGN §41.9）
       ]);
       for (const ev of ctx.replayAfter(lastEventId)) {
         if (!REPLAYABLE.has(ev.type) || !allow(ev.type)) continue;
-        await stream.writeSSE({ id: String(ev.seq), event: ev.type, data: JSON.stringify(stripPrivate(ev)) });
+        await stream.writeSSE({ id: String(ev.seq), event: ev.type, data: JSON.stringify(ev) });
       }
 
       // 3) 实时订阅
@@ -72,7 +73,7 @@ export function mountSessionEventsRoutes(app: Hono<SessionEnv>): void {
         send: async (ev: GatewayEvent) => {
           if (!allow(ev.type)) return true; // 被过滤不算写失败（保住订阅）
           try {
-            await stream.writeSSE({ id: String(ev.seq), event: ev.type, data: JSON.stringify(stripPrivate(ev)) });
+            await stream.writeSSE({ id: String(ev.seq), event: ev.type, data: JSON.stringify(ev) });
             return true;
           } catch {
             return false;
@@ -93,9 +94,4 @@ export function mountSessionEventsRoutes(app: Hono<SessionEnv>): void {
       }
     });
   });
-
-  function stripPrivate(ev: GatewayEvent) {
-    const { seq, ts, ...rest } = ev;
-    return { ...rest, seq, ts };
-  }
 }

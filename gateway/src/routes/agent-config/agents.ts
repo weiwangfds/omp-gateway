@@ -14,9 +14,67 @@ import {
   tryParseAgentMarkdown,
   type AgentDocument,
 } from "../../core/config-codec.ts";
-import { userAgentDir } from "../../core/paths.ts";
+import { globalAgentsDir, userAgentDir } from "../../core/paths.ts";
 import { audit } from "../../core/tenant-store.ts";
 import type { AgentConfigEnv } from "./env.ts";
+
+const asList = (v: unknown): string[] | null => {
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === "string" && v.trim())
+    return v
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  return null;
+};
+
+/** 扫描 agent 定义目录（*.md），带 scope 标签（user/global）；目录不存在返回空。 */
+async function describeAgentFiles(dir: string, scope: "user" | "global"): Promise<Array<Record<string, unknown>>> {
+  const entries = await fs.readdir(dir).catch(() => [] as string[]);
+  const agents: Array<Record<string, unknown>> = [];
+  for (const file of entries) {
+    if (!file.endsWith(".md")) continue;
+    const full = path.join(dir, file);
+    // 根目录边界校验（词法）：join 结果必须仍位于 dir 内（readdir 理论上不含路径段，双保险）
+    const root = path.resolve(dir);
+    const target = path.resolve(full);
+    if (target !== root && !target.startsWith(root + path.sep)) continue;
+    const st = await fs.stat(full).catch(() => null);
+    if (!st?.isFile()) continue;
+    const text = await fs.readFile(full, "utf8").catch(() => "");
+    const parsed = tryParseAgentMarkdown(text);
+    const fm = parsed?.frontmatter ?? null;
+    const body = parsed ? parsed.instructions : text;
+    const nameFromFile = file.replace(/\.md$/, "");
+    const name = String(fm?.name ?? nameFromFile);
+    agents.push({
+      name,
+      file,
+      scope,
+      valid: Boolean(fm?.name && fm?.description),
+      ...(typeof fm?.description === "string" ? { description: fm.description } : {}),
+      tools: asList(fm?.tools),
+      model: asList(fm?.model),
+      thinkingLevel: fm?.["thinking-level"] ?? fm?.thinkingLevel ?? fm?.thinking ?? null,
+      spawns: fm?.spawns === "*" ? "*" : asList(fm?.spawns),
+      autoloadSkills: asList(fm?.["autoload-skills"] ?? fm?.autoloadSkills),
+      readSummarize: fm?.["read-summarize"] ?? fm?.readSummarize ?? null,
+      structured: fm?.structured ?? null,
+      blocking: fm?.blocking ?? null,
+      prewalk: fm?.prewalk ?? null,
+      advisor: fm?.advisor ?? null,
+      hasOutputSchema: fm?.output !== undefined,
+      instructionsChars: body.trim().length,
+      bytes: st.size,
+      updatedAt: st.mtime.toISOString(),
+      // 名字与文件名不一致会被 SDK 按 frontmatter name 注册（提示修正）
+      ...(name !== nameFromFile
+        ? { warning: `frontmatter name "${name}" differs from filename "${nameFromFile}"` }
+        : {}),
+    });
+  }
+  return agents.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
 
 /** Agent 定义 CRUD：agentDir/agents/*.md 原文与结构化 JSON 双通道（DESIGN §28/§30）。 */
 export function mountAgentDefinitionRoutes(app: Hono<AgentConfigEnv>): void {
@@ -24,58 +82,11 @@ export function mountAgentDefinitionRoutes(app: Hono<AgentConfigEnv>): void {
 
   const agentsDir = (uid: string) => path.join(userAgentDir(uid), "agents");
 
-  const asList = (v: unknown): string[] | null => {
-    if (Array.isArray(v)) return v.map(String);
-    if (typeof v === "string" && v.trim())
-      return v
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-    return null;
-  };
-
   app.get("/me/agents", async (c) => {
     const uid = c.get("userId");
-    const dir = agentsDir(uid);
-    const entries = await fs.readdir(dir).catch(() => [] as string[]);
-    const agents: Array<Record<string, unknown>> = [];
-    for (const file of entries) {
-      if (!file.endsWith(".md")) continue;
-      const full = path.join(dir, file);
-      const st = await fs.stat(full).catch(() => null);
-      if (!st?.isFile()) continue;
-      const text = await fs.readFile(full, "utf8").catch(() => "");
-      const parsed = tryParseAgentMarkdown(text);
-      const fm = parsed?.frontmatter ?? null;
-      const body = parsed ? parsed.instructions : text;
-      const nameFromFile = file.replace(/\.md$/, "");
-      const name = String(fm?.name ?? nameFromFile);
-      agents.push({
-        name,
-        file,
-        valid: Boolean(fm?.name && fm?.description),
-        ...(typeof fm?.description === "string" ? { description: fm.description } : {}),
-        tools: asList(fm?.tools),
-        model: asList(fm?.model),
-        thinkingLevel: fm?.["thinking-level"] ?? fm?.thinkingLevel ?? fm?.thinking ?? null,
-        spawns: fm?.spawns === "*" ? "*" : asList(fm?.spawns),
-        autoloadSkills: asList(fm?.["autoload-skills"] ?? fm?.autoloadSkills),
-        readSummarize: fm?.["read-summarize"] ?? fm?.readSummarize ?? null,
-        structured: fm?.structured ?? null,
-        blocking: fm?.blocking ?? null,
-        prewalk: fm?.prewalk ?? null,
-        advisor: fm?.advisor ?? null,
-        hasOutputSchema: fm?.output !== undefined,
-        instructionsChars: body.trim().length,
-        bytes: st.size,
-        updatedAt: st.mtime.toISOString(),
-        // 名字与文件名不一致会被 SDK 按 frontmatter name 注册（提示修正）
-        ...(name !== nameFromFile
-          ? { warning: `frontmatter name "${name}" differs from filename "${nameFromFile}"` }
-          : {}),
-      });
-    }
-    agents.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const agents = await describeAgentFiles(agentsDir(uid), "user");
+    // 全局定义合成进各会话 workspace（composeAgentsForWorkspace）；这里仅清单可见性
+    agents.push(...(await describeAgentFiles(globalAgentsDir(), "global")));
     return c.json({
       agents,
       dir: "agent/agents/",

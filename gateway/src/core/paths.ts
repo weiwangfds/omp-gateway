@@ -16,6 +16,9 @@ export const globalDir = () => path.join(config.dataRoot, "global");
 export const globalMcpPath = () => path.join(globalDir(), "mcp.json");
 export const globalSkillsDir = () => path.join(globalDir(), "skills");
 export const globalExtensionsDir = () => path.join(globalDir(), "extensions");
+export const globalAgentsDir = () => path.join(globalDir(), "agents");
+/** KB 元数据库目录（DESIGN §38.2）：每个知识库一个 <slug>.db。 */
+export const globalKbDir = () => path.join(globalDir(), "kb");
 
 /** 用户数据根：`<dataRoot>/users/<uid>`（agentDir、会话、workspace 均在其下）。 */
 export const userRoot = (uid: string) => path.join(config.dataRoot, "users", uid);
@@ -54,6 +57,8 @@ export async function ensureGlobalScaffold(): Promise<void> {
   await Promise.all([
     fs.mkdir(globalSkillsDir(), { recursive: true }),
     fs.mkdir(globalExtensionsDir(), { recursive: true }),
+    fs.mkdir(globalAgentsDir(), { recursive: true }),
+    fs.mkdir(globalKbDir(), { recursive: true }),
   ]);
   if (!(await fs.exists(globalMcpPath()))) {
     await Bun.write(globalMcpPath(), `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`);

@@ -70,6 +70,8 @@ app.post("/me/models/test", async (c) => {
   const started = Date.now();
   let ttftMs: number | null = null;
   let firstDelta = true;
+  // 探针会话提出到外层：失败路径也要 dispose（此前仅成功路径回收，失败探针泄漏会话）
+  let probe: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
   try {
     const { session } = await createAgentSession({
       model,
@@ -84,6 +86,7 @@ app.post("/me/models/test", async (c) => {
       hasUI: false,
       bindProcessState: false, // 一次性探针，绝不持有进程级 setting effects
     });
+    probe = session;
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("probe timeout (30s)")), 30_000);
       timer.unref?.();
@@ -100,7 +103,6 @@ app.post("/me/models/test", async (c) => {
     });
     await session.prompt(body?.prompt ? String(body.prompt) : "Reply with exactly: OK");
     await done;
-    await session.dispose();
     return c.json({ ok: true, ttftMs, durationMs: Date.now() - started });
   } catch (err) {
     return c.json({
@@ -109,6 +111,8 @@ app.post("/me/models/test", async (c) => {
       ttftMs,
       durationMs: Date.now() - started,
     });
+  } finally {
+    await probe?.dispose().catch(() => {});
   }
 });
 

@@ -18,6 +18,7 @@ import { registry, type SessionCtx } from "../../core/session-registry.ts";
 import { RateLimitedError, checkRpm, countBudgetExceeded, countRateLimited } from "../../core/rate-limit.ts";
 import { streamingGate } from "../../core/streaming-gate.ts";
 import { fromStorePath } from "../../core/paths.ts";
+import { isTuiActive } from "../../core/tui-registry.ts";
 import {
   getOrCreateTenant,
   getSession,
@@ -106,6 +107,13 @@ streamingGate.setUserLimitProvider((uid) => tenantLimits(getOrCreateTenant(uid))
  * 已在 streaming（steer/排队进 omp）不新增并发 turn，不占槽。
  */
 export async function withTurnSlot<T>(ctx: SessionCtx, userId: string, fn: () => Promise<T>): Promise<T> {
+  // TUI 终端占用期写互斥（DESIGN §41.9）：omp TUI 进程是 JSONL 的活跃写者，网关侧
+  // 新 turn 会与其分叉（双方内存 leaf 各自独立）。读面不受影响；TUI 关闭后自动恢复。
+  if (isTuiActive(ctx.sid)) {
+    const err = new Error("TUI terminal is attached to this session; writes are exclusive to the terminal");
+    (err as { code?: string }).code = "TUI_ACTIVE";
+    throw err;
+  }
   const wasStreaming = ctx.streaming;
   let release: (() => void) | null = null;
   let off: (() => void) | null = null;
@@ -145,6 +153,12 @@ export async function withTurnSlot<T>(ctx: SessionCtx, userId: string, fn: () =>
 export async function getOrRevive(row: SessionRow, userId: string): Promise<SessionCtx | undefined> {
   const existing = registry.get(row.id);
   if (existing) return existing;
+  // 前端 TUI 占用期拒绝复活：TUI 进程是 JSONL 唯一写者，网关侧并发打开 = 双写（§41.9）
+  if (isTuiActive(row.id)) {
+    const e = new Error("TUI terminal is attached to this session; close it first");
+    (e as { code?: string }).code = "TUI_ACTIVE";
+    throw e;
+  }
   if (!row.session_file) return undefined;
   try {
     const { ctx } = await createGatewaySession({

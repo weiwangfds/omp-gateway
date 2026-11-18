@@ -36,6 +36,8 @@ export interface GatewayConfig {
   exportDir: string;
   /** 迁移 bundle 导入允许读取的根（逗号分隔；默认含 exportDir） */
   importDirs: string[];
+  /** KB 上传体上限（DESIGN §38.4；KB_UPLOAD_MAX_MB，upload/pdf 路由专用，不借 /api 的 20MB） */
+  kbUploadMaxMb: number;
 }
 
 function loadConfig(): GatewayConfig {
@@ -81,6 +83,8 @@ function loadConfig(): GatewayConfig {
       .filter(Boolean),
     exportDir,
     importDirs,
+    // KB 语料包（MinerU zip）可达 GB 级：独立上限，默认 2048MB
+    kbUploadMaxMb: Number(process.env.KB_UPLOAD_MAX_MB ?? 2048),
   };
 }
 

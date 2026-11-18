@@ -39,14 +39,15 @@ export interface SdkShared {
   withTurnSlot: SdkBridgeDeps["withTurnSlot"];
   parseImages: typeof parseImages;
   ownedSession: SdkBridgeDeps["ownedSession"];
+  enforceTurnPolicy: SdkBridgeDeps["enforceTurnPolicy"];
 }
 
 export function createSdkShared(deps: SdkBridgeDeps): SdkShared {
-  const { ownedSession, getOrRevive, withTurnSlot, jsonError } = deps;
+  const { ownedSession, getOrRevive, withTurnSlot, jsonError, enforceTurnPolicy } = deps;
   const live = createSessionAccess({ ownedSession, getOrRevive, jsonError }).resolve;
   const modelOf = (session: AgentSession) => {
     const m = (session as unknown as { model?: { provider?: string; id?: string } }).model;
     return m?.provider && m?.id ? { provider: m.provider, modelId: m.id } : null;
   };
-  return { live, modelOf, jsonError, withTurnSlot, parseImages, ownedSession };
+  return { live, modelOf, jsonError, withTurnSlot, parseImages, ownedSession, enforceTurnPolicy };
 }

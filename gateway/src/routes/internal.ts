@@ -5,6 +5,7 @@
 import { Hono } from "hono";
 import { Database } from "bun:sqlite";
 import path from "node:path";
+import { parseUInt } from "./pagination.ts";
 import { ensureUserScaffold } from "../core/paths.ts";
 import { generateSecret } from "../core/signature.ts";
 import {
@@ -114,8 +115,8 @@ internalApp.delete("/users/:uid", async (c) => {
 
 /** 审计查询（内部契约）：?user=&action=&page=&per_page= */
 internalApp.get("/audit", (c) => {
-  const page = Math.max(Number(c.req.query("page") ?? 1), 1);
-  const perPage = Math.min(Number(c.req.query("per_page") ?? 50), 200);
+  const page = Math.max(parseUInt(c.req.query("page"), 1), 1);
+  const perPage = Math.min(parseUInt(c.req.query("per_page"), 50), 200);
   const r = queryAudit({
     user: c.req.query("user") ?? undefined,
     action: c.req.query("action") ?? undefined,

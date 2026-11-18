@@ -10,6 +10,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+// task 子系统同源的 agent 发现（验证 workspace 合成结果可被 SDK 发现）
+import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task";
 
 const PORT = 8796;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -344,7 +346,7 @@ describe("管理 API：MCP/skill/tool 全局与个人（DESIGN §18）", () => {
           body: src,
         });
 
-  test("admin 鉴权：缺/错 X-Admin-Token → 403（svc-token 不提权）", async () => {
+  test("admin 鉴权：缺/空 X-Admin-Id → 403（svc-token 不提权）", async () => {
     expect((await fetch(`${BASE}/admin/global/skills`, { headers: h("sc-a") })).status).toBe(403);
     expect((await fetch(`${BASE}/admin/global/skills`, { headers: { ...H, ...ADM, "x-admin-id": "" } })).status).toBe(
       403,
@@ -453,5 +455,112 @@ describe("管理 API：MCP/skill/tool 全局与个人（DESIGN §18）", () => {
       await fetch(`${BASE}/api/sessions/${sidNew}/file?path=.omp/mcp.json`, { headers: h("sc-b") })
     ).json();
     expect(Object.keys(JSON.parse(composed.content).mcpServers)).toContain("mcp-managed");
+  });
+
+  test("全局 agent 管理：PUT → 各用户新会话可见 → 用户同名覆盖 → DELETE 后新会话不再合成", async () => {
+    const ADMH = { ...H, ...ADM };
+    const def = {
+      description: "managed global subagent for scoping test",
+      tools: ["read", "grep"],
+      instructions: "You are the global test agent. Answer with GLOBAL.",
+    };
+    // CRUD：结构化 PUT → 清单/原文/DTO；非法名与非法体 400；非 admin 403
+    expect(
+      (
+        await fetch(`${BASE}/admin/global/agents/mgr-global-agent`, {
+          method: "PUT",
+          headers: ADMH,
+          body: JSON.stringify(def),
+        })
+      ).status,
+    ).toBe(201);
+    const list = await (await fetch(`${BASE}/admin/global/agents`, { headers: ADMH })).json();
+    const found = list.agents.find((a: any) => a.name === "mgr-global-agent");
+    expect(found?.valid).toBeTrue();
+    expect(found?.description).toBe(def.description);
+    expect((await fetch(`${BASE}/admin/global/agents/mgr-global-agent`, { headers: ADMH })).status).toBe(200);
+    const dto = await (
+      await fetch(`${BASE}/admin/global/agents/mgr-global-agent?format=json`, { headers: ADMH })
+    ).json();
+    expect(dto.name).toBe("mgr-global-agent");
+    expect(dto.tools).toEqual(["read", "grep"]);
+    expect(
+      (await fetch(`${BASE}/admin/global/agents/Bad_Name`, { method: "PUT", headers: ADMH, body: JSON.stringify(def) }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${BASE}/admin/global/agents/mgr-global-agent`, {
+          method: "PUT",
+          headers: ADMH,
+          body: JSON.stringify({ description: "missing instructions" }),
+        })
+      ).status,
+    ).toBe(400);
+    expect((await fetch(`${BASE}/admin/global/agents`, { headers: h("sc-a") })).status).toBe(403);
+
+    // 用户级清单带 scope 标签：每个用户都看得到全局 agent
+    const me = await (await fetch(`${BASE}/api/me/agents`, { headers: h("sc-b") })).json();
+    expect(me.agents.find((a: any) => a.name === "mgr-global-agent")?.scope).toBe("global");
+
+    // 新会话（sc-b，未覆盖）：workspace 合成 + SDK 发现（discoverAgents = task 子系统同源）
+    const sid1 = (
+      await (await fetch(`${BASE}/api/sessions`, { method: "POST", headers: h("sc-b"), body: "{}" })).json()
+    ).id;
+    const file1 = await (
+      await fetch(`${BASE}/api/sessions/${sid1}/file?path=.omp/agents/mgr-global-agent.md`, { headers: h("sc-b") })
+    ).json();
+    expect(file1.content).toContain("You are the global test agent.");
+    const ws1 = path.join(dataRoot, "users", "sc-b", "workspaces", sid1);
+    const disc1 = await discoverAgents(ws1);
+    const d1 = (disc1.agents ?? []).find((a: any) => a.name === "mgr-global-agent");
+    expect(d1?.description).toBe(def.description);
+    expect(d1?.source).toBe("project");
+
+    // 用户同名覆盖：sc-b 自定义 → 新会话不再合成文件（user 作用域提供定义）；sc-a 仍见全局版
+    expect(
+      (
+        await fetch(`${BASE}/api/me/agents/mgr-global-agent`, {
+          method: "PUT",
+          headers: h("sc-b"),
+          body: JSON.stringify({ description: "user override", instructions: "USER version." }),
+        })
+      ).status,
+    ).toBe(201);
+    const sid2 = (
+      await (await fetch(`${BASE}/api/sessions`, { method: "POST", headers: h("sc-b"), body: "{}" })).json()
+    ).id;
+    expect(
+      (await fetch(`${BASE}/api/sessions/${sid2}/file?path=.omp/agents/mgr-global-agent.md`, { headers: h("sc-b") }))
+        .status,
+    ).toBe(404);
+    // sc-b 同名双清单（user 在前 + global）；覆盖定义只存在于 user 作用域
+    const me2 = await (await fetch(`${BASE}/api/me/agents`, { headers: h("sc-b") })).json();
+    expect(me2.agents.filter((a: any) => a.name === "mgr-global-agent").map((a: any) => a.scope)).toEqual([
+      "user",
+      "global",
+    ]);
+    const sidA2 = (
+      await (await fetch(`${BASE}/api/sessions`, { method: "POST", headers: h("sc-a"), body: "{}" })).json()
+    ).id;
+    const fileA2 = await (
+      await fetch(`${BASE}/api/sessions/${sidA2}/file?path=.omp/agents/mgr-global-agent.md`, { headers: h("sc-a") })
+    ).json();
+    expect(fileA2.content).toContain("You are the global test agent.");
+
+    // 清理：用户覆盖 + 全局删除 → 新会话不再可见；重复 DELETE → 404
+    await fetch(`${BASE}/api/me/agents/mgr-global-agent`, { method: "DELETE", headers: h("sc-b") });
+    expect(
+      (await fetch(`${BASE}/admin/global/agents/mgr-global-agent`, { method: "DELETE", headers: ADMH })).status,
+    ).toBe(200);
+    expect(
+      (await fetch(`${BASE}/admin/global/agents/mgr-global-agent`, { method: "DELETE", headers: ADMH })).status,
+    ).toBe(404);
+    const sid3 = (
+      await (await fetch(`${BASE}/api/sessions`, { method: "POST", headers: h("sc-b"), body: "{}" })).json()
+    ).id;
+    const ws3 = path.join(dataRoot, "users", "sc-b", "workspaces", sid3);
+    const disc3 = await discoverAgents(ws3);
+    expect((disc3.agents ?? []).map((a: any) => a.name)).not.toContain("mgr-global-agent");
   });
 });

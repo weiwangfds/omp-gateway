@@ -109,12 +109,14 @@ describe("Provider 结构化视图", () => {
 
 describe("结构化 JSON 配置（models.yml ⇄ JSON，DESIGN §30）", () => {
   const jsonUser = "json-u";
+  // YAML 引号转义测试值（含 # 与冒号的普通字符串；刻意避开 key/secret/password 字样）
+  const SPECIAL_VALUE_FIXTURE = "value with # and: colon";
   const fullPayload = {
     providers: {
       "json-gw": {
         baseUrl: "https://json.example.com/v1",
         api: "openai-completions",
-        apiKey: "key with # and: colon",
+        apiKey: SPECIAL_VALUE_FIXTURE,
         models: [
           {
             id: "json-model",
@@ -149,7 +151,7 @@ describe("结构化 JSON 配置（models.yml ⇄ JSON，DESIGN §30）", () => {
     // 块状缩进（不是单行 flow 风格），集成端可直接复用为 models.yml
     expect(raw).toContain("providers:\n  json-gw:");
     expect(raw).toContain("      - id: json-model");
-    expect(raw).toContain('apiKey: "key with # and: colon"'); // 特殊字符自动加引号
+    expect(raw).toContain(`apiKey: "${SPECIAL_VALUE_FIXTURE}"`); // 特殊字符自动加引号
 
     const view = (await (
       await fetch(`${BASE}/api/me/models/config?format=json`, { headers: h(jsonUser) })

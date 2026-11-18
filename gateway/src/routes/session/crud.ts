@@ -4,6 +4,7 @@
  */
 import type { Hono } from "hono";
 import * as fs from "node:fs/promises";
+import { parseUInt } from "../pagination.ts";
 import { disposeSession } from "../../core/session-factory.ts";
 import { fromStorePath } from "../../core/paths.ts";
 import { registry } from "../../core/session-registry.ts";
@@ -56,8 +57,8 @@ export function mountSessionCrudRoutes(app: Hono<SessionEnv>): void {
     const rows = listSessions(
       userId,
       status,
-      Number(c.req.query("per_page") ?? 50),
-      Number(c.req.query("page") ?? 0),
+      parseUInt(c.req.query("per_page"), 50),
+      parseUInt(c.req.query("page"), 0),
       c.req.query("q"),
     );
     // pi-web 对标：列表内联运行态/用量/上下文/预览（页大小有限，N+1 可接受）

@@ -8,7 +8,7 @@ import { audit } from "../../core/tenant-store.ts";
 
 /** 会话控制：compact / follow-up / custom message / reset / handoff / cycle / queue / name。 */
 export function mountControlRoutes(app: Hono<SdkEnv>, shared: SdkShared): void {
-  const { live, jsonError, withTurnSlot, parseImages, modelOf } = shared;
+  const { live, jsonError, withTurnSlot, parseImages, modelOf, enforceTurnPolicy } = shared;
 
   // ---- 手动压缩 ----
   app.post("/:sid/compact", async (c) => {
@@ -25,13 +25,8 @@ export function mountControlRoutes(app: Hono<SdkEnv>, shared: SdkShared): void {
       audit("session.compact", "session", r.row.id, c.get("userId"));
       return c.json({ result });
     } catch (err) {
-      if (
-        err instanceof Error &&
-        /no model|model/i.test(err.message) === false &&
-        (err as any).code === "SESSION_NOT_LIVE"
-      ) {
-        return jsonError(c, 409, "SESSION_NOT_LIVE", err.message);
-      }
+      if ((err as any)?.code === "SESSION_NOT_LIVE")
+        return jsonError(c, 409, "SESSION_NOT_LIVE", (err as Error).message);
       return jsonError(c, 409, "COMPACT_FAILED", err instanceof Error ? err.message : String(err));
     }
   });
@@ -44,6 +39,12 @@ export function mountControlRoutes(app: Hono<SdkEnv>, shared: SdkShared): void {
     if (typeof body?.text !== "string" || !body.text) return jsonError(c, 400, "BAD_REQUEST", "body.text required");
     const images = parseImages(body?.images);
     if (typeof images === "string") return jsonError(c, 400, "BAD_REQUEST", images);
+    // followUp 排队开启新 turn → 与 /prompt、集成门面同过预算/RPM 策略
+    const policy = enforceTurnPolicy(c.get("userId"));
+    if (policy) {
+      if (policy.retryAfter) c.header("Retry-After", String(policy.retryAfter));
+      return c.json(policy.body, policy.status);
+    }
     try {
       await withTurnSlot(r.ctx, c.get("userId"), () =>
         (r.ctx.session as unknown as { followUp: (t: string, imgs?: unknown) => Promise<void> }).followUp(
@@ -69,6 +70,14 @@ export function mountControlRoutes(app: Hono<SdkEnv>, shared: SdkShared): void {
     const deliverAs = body?.deliverAs;
     if (deliverAs && !["steer", "followUp", "aside"].includes(deliverAs)) {
       return jsonError(c, 400, "BAD_REQUEST", "deliverAs must be steer|followUp|aside");
+    }
+    // triggerTurn=true 会开启新 turn → 过预算/RPM 策略（与集成门面 willTriggerTurn 同语义）
+    if (body?.triggerTurn === true) {
+      const policy = enforceTurnPolicy(c.get("userId"));
+      if (policy) {
+        if (policy.retryAfter) c.header("Retry-After", String(policy.retryAfter));
+        return c.json(policy.body, policy.status);
+      }
     }
     const s = r.ctx.session as unknown as {
       sendCustomMessage: (m: unknown, o?: { deliverAs?: string; triggerTurn?: boolean }) => Promise<unknown>;

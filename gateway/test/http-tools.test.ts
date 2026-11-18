@@ -1,6 +1,6 @@
 /**
  * 集成端 HTTP 工具（DESIGN §24）e2e：业务端点注册为 agent 工具 → 模型真实调用。
- * 覆盖：CRUD 校验、创建期注入、模型调用触发回调（args 透传）、结果回填。
+ * 覆盖：双作用域 CRUD 校验、模型调用触发回调（args 透传）、结果回填、作用域隔离。
  * 凭据缺失时跳过模型部分。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";

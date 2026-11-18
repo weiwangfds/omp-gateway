@@ -3,10 +3,9 @@ import type { Hono } from "hono";
 /**
  * OpenAPI 3.1 契约生成器（DESIGN §12 契约冻结，§33 后随实现演进）。
  *
- * 三层来源：
+ * 两层来源：
  *  1. 路由表内省（paths/methods/路径参数，route() 已合并挂载前缀）
- *  2. ROUTE_DOCS 精选操作文档（摘要/请求体/错误码——集成端高频面逐个维护）
- *  3. FAMILY_SUMMARY 族摘要（其余操作按路径前缀覆盖，保证 100% 有摘要）
+ *  2. SUMMARIES 操作级摘要表（每个操作一条，覆盖 100% 操作；缺键回退 "METHOD path" 字面）
  *
  * 语义细节以 docs/DESIGN.md 与 contracts/* 为准；本文件只做机器可读投影。
  */
@@ -43,6 +42,8 @@ export const GATEWAY_EVENT_TYPES = [
   "business.event",
   "business.completed",
   "omp.raw",
+  // v1.4 TUI 终端桥（events.ts 已发布、SSE 可回放，此前枚举漏登）
+  "tui.entry",
 ] as const;
 
 /** 错误码契约投影（contracts/error-codes.md 的机器可读版；按 code 分支，勿解析 message）。 */
@@ -73,7 +74,7 @@ export const GATEWAY_ERROR_CODES: Record<string, string> = {
   INVALID_SESSION_FILE: "400 会话 JSONL 校验失败",
   CONFIRM_REQUIRED: "400 危险操作需 confirm",
   PATH_FORBIDDEN: "403/400 路径越界（三重守卫）",
-  FILE_TOO_LARGE: "413 文件超限（读 25MB/写 5MB/插件 2MB）",
+  FILE_TOO_LARGE: "413 文件超限（读 2MB/写 5MB/raw 流 25MB/插件 2MB）",
   SNAPSHOT_EMPTY: "409 零 turn 会话无可快照内容",
   ALREADY_EXISTS: "409 资源已存在",
   MAINTENANCE_BUSY: "409 迁移操作进行中",
@@ -83,11 +84,56 @@ export const GATEWAY_ERROR_CODES: Record<string, string> = {
   BUNDLE_INCOMPLETE: "400 bundle 校验和/计数对账失败",
   DRAINING: "503 实例关停中，切流到其他实例",
   GATEWAY_UNCONFIGURED: "503 未配置 svc-token（运维问题）",
+  INVALID_SLUG: "400 KB slug 不合 skill 名规",
+  INVALID_DOC_NAME: "400 KB 文档名清洗后仍不合规",
+  INVALID_ZIP: "400 MinerU zip 缺 markdown.md / 非法条目 / 分组路径非法 / 魔数不符",
+  KB_NOT_FOUND: "404 知识库不存在",
+  DOC_NOT_FOUND: "404 知识库文档不存在（或 source.pdf 未补传）",
+  WREN_DISABLED: "409 数据查询层未启用（WREN_MCP!=1）",
+  WREN_UNAVAILABLE: "503 wren CLI 不可用（WREN_BIN/PATH 均未找到）",
+  // ---- 以下为 ERRORS 表已引用但此前漏登的码（与 contracts/error-codes.md 对账补齐） ----
+  BAD_REQUEST: "400 参数校验失败（看 message 指明字段）",
+  INVALID_JSON: "400 JSON 语法错误（MCP/结构化配置请求体）",
+  INVALID_YAML: "400 models.yml 语法或根结构错误（如 `providers` 不是映射）",
+  INVALID_NAME: "400 skill/plugin/agent 命名不合规（正则见 DESIGN §18/§28）",
+  INVALID_RANGE: "400 Range 头非法/不可满足（文件下载）",
+  PAYLOAD_TOO_LARGE: "413 请求体超 GATEWAY_BODY_LIMIT_MB（默认 20MB）或配置文本超限",
+  PROVIDER_NOT_ALLOWED: "403 additionalDirectories/provider 越权（用户根守卫）",
+  INPUT_BLOCKED: "403 输入被集成端 input 钩子拦截",
+  TENANT_DISABLED: "403 租户被禁用（/internal 状态机），上游应停止调用",
+  NOT_A_GIT_REPO: "409 workspace 非 git 仓库",
+  GIT_FAILED: "409 git 命令失败（message 含 stderr 截断）",
+  NOT_SUPPORTED: "409 该 SDK 版本/会话不支持（如 todo 编辑）",
+  NOT_REVIVABLE: "409 子代理无持久化 transcript，无法复活",
+  REVIVE_FAILED: "409 子代理复活失败（workspace 丢失/契约缺失）",
+  AGENT_ALREADY_LIVE: "409 子代理已 live，无需 revive",
+  AGENT_NOT_LIVE: "409 子代理 parked/killed 且复活失败",
+  AGENT_CHAT_FAILED: "409 子代理 chat 失败",
+  COMPACT_FAILED: "409 压缩失败（小上下文/无内容可压）",
+  RESET_FAILED: "409 上下文重置失败",
+  HANDOFF_FAILED: "409 移交失败（通常需更大上下文）",
+  FOLLOW_UP_FAILED: "409 follow-up 入队失败（非 streaming 或非法）",
+  CUSTOM_MESSAGE_FAILED: "409 自定义消息投递失败",
+  QUEUE_CLEAR_FAILED: "409 队列清理失败",
+  NO_MESSAGES: "409 标题生成无用户消息",
+  TITLE_FAILED: "409 标题生成失败（模型错误，看 message）",
+  MCP_DISABLED: "409 会话 enableMcp:false，无 MCP manager",
+  MCP_RELOAD_FAILED: "409 MCP reload 失败（服务器连接错误）",
+  MCP_RECONNECT_FAILED: "409 MCP 单服务器重连失败",
+  INJECT_FAILED: "409 集成端上下文注入失败",
+  BUSINESS_EVENT_INJECT_FAILED: "409 业务事件已登记但上下文注入失败",
+  FORK_REJECTED: "409 fork 被 hook 拒绝或会话未持久化",
+  FORK_FAILED: "409/500 fork 执行失败（workspace 拷贝等）",
+  FRESH_REJECTED: "409 freshSession 被拒（状态不符）",
+  BRANCH_CANCELLED: "409 branch 被 hook 取消",
+  BRANCH_FAILED: "409 branch 执行失败",
+  EXPORT_FAILED: "500 导出 bundle 失败",
+  IMPORT_FAILED: "500 导入 bundle 失败",
 };
 
 const ERROR_SCHEMA_REF = { $ref: "#/components/schemas/Error" };
 
-/** 常用请求体（轻量 JSON Schema；复杂语义由 ROUTE_DOCS.summary 补充说明）。 */
+/** 常用请求体（轻量 JSON Schema；复杂语义由 SUMMARIES 对应条目的摘要补充说明）。 */
 const BODY = {
   prompt: {
     type: "object",
@@ -240,6 +286,52 @@ const BODY = {
       confirm: { type: "string", enum: ["REPLACE"] },
     },
   },
+  kbCreate: {
+    type: "object",
+    required: ["slug"],
+    properties: {
+      slug: { type: "string", description: "KB 标识（^[a-z0-9][a-z0-9-]{0,63}$），skill 名恒为 kb-<slug>" },
+      title: { type: "string", description: "展示标题（缺省 = slug）" },
+    },
+  },
+  wrenDatasource: {
+    type: "object",
+    required: ["datasource", "connection"],
+    properties: {
+      datasource: {
+        type: "string",
+        description: "wren 类型（如 postgres/clickhouse；权威字段见 wren docs connection-info）",
+      },
+      connection: {
+        type: "object",
+        description:
+          "连接字段（postgres: host/port/database/user/password；clickhouse: host/httpPort/database/user/password）",
+        additionalProperties: true,
+      },
+      tables: {
+        type: "array",
+        nullable: true,
+        items: { type: "string" },
+        description: '内省白名单（"schema.table" 精确匹配）；缺省/null = 全部非系统表',
+      },
+    },
+  },
+  wrenTestRequest: {
+    type: "object",
+    description: "缺省测注册表既有条目；给 datasource+connection 即测未落库载荷",
+    properties: {
+      datasource: { type: "string" },
+      connection: { type: "object", additionalProperties: true },
+    },
+  },
+  wrenSyncRequest: {
+    type: "object",
+    description:
+      "缺省按 drift 检测同步（catalogHash 相同短路）；force=true 跳过短路（无内省器类型仅重编译 + 重启 daemon）",
+    properties: {
+      force: { type: "boolean", description: "强制同步（跳过 drift 短路，无条件 context build + daemon 重启）" },
+    },
+  },
 } as const;
 
 /* ── 操作级文档表 ──────────────────────────────────────────────────────────
@@ -303,6 +395,13 @@ const QUERIES: Record<string, Array<{ name: string; description: string; schema?
       schema: { type: "string", enum: ["json"] },
     },
   ],
+  "GET /admin/global/agents/{name}": [
+    {
+      name: "format",
+      description: "设为 json 返回规范字段 + frontmatter（默认 markdown 原文）",
+      schema: { type: "string", enum: ["json"] },
+    },
+  ],
   "GET /api/me/usage": [
     { name: "group", description: "分桶维度", schema: { type: "string", enum: ["day", "model", "session"] } },
     { name: "from", description: "起始日期（含）" },
@@ -336,7 +435,6 @@ const QUERIES: Record<string, Array<{ name: string; description: string; schema?
   ],
   "GET /api/sessions/{sid}/files/index": [{ name: "q", description: "按名模糊查询文件索引" }],
   "GET /api/sessions/{sid}/git/log": [{ name: "limit", description: "提交条数（1-100）", schema: { type: "integer" } }],
-  "GET /api/sessions/{cmd}/git/diff": [],
   "GET /api/sessions/{sid}/git/diff": [
     { name: "path", description: "只看某个路径" },
     { name: "staged", description: "设为 1 看已暂存区" },
@@ -466,6 +564,31 @@ const ERRORS: Record<string, string[]> = {
   "PUT /admin/global/skills/{name}": ["400 INVALID_NAME"],
   "PUT /admin/global/plugins/{name}": ["400 INVALID_NAME"],
   "PUT /admin/global/mcp": ["400 INVALID_JSON"],
+  "POST /admin/kb": ["400 INVALID_SLUG", "409 ALREADY_EXISTS"],
+  "GET /admin/kb": [],
+  "POST /admin/kb/{slug}/upload": [
+    "400 INVALID_ZIP",
+    "400 INVALID_DOC_NAME",
+    "404 KB_NOT_FOUND",
+    "413 PAYLOAD_TOO_LARGE",
+  ],
+  "POST /admin/kb/{slug}/pdf": ["400 BAD_REQUEST", "404 KB_NOT_FOUND", "404 DOC_NOT_FOUND", "413 PAYLOAD_TOO_LARGE"],
+  "GET /admin/kb/{slug}/pdf/{doc}": ["400 INVALID_SLUG", "404 KB_NOT_FOUND", "404 DOC_NOT_FOUND"],
+  "GET /admin/kb/{slug}/tree": ["400 INVALID_SLUG", "404 KB_NOT_FOUND"],
+  "GET /admin/kb/{slug}/index-status": ["400 INVALID_SLUG", "404 KB_NOT_FOUND"],
+  "DELETE /admin/kb/{slug}/doc/{doc}": ["400 INVALID_SLUG", "404 KB_NOT_FOUND", "404 DOC_NOT_FOUND"],
+  "DELETE /admin/kb/{slug}": ["400 INVALID_SLUG", "404 KB_NOT_FOUND"],
+  "PUT /admin/global/agents/{name}": ["400 INVALID_AGENT", "400 INVALID_FRONTMATTER", "400 INVALID_NAME"],
+  "GET /admin/global/agents/{name}": ["400 INVALID_NAME", "404 NOT_FOUND"],
+  "DELETE /admin/global/agents/{name}": ["400 INVALID_NAME", "404 NOT_FOUND"],
+  "GET /admin/wren/datasources": ["409 WREN_DISABLED"],
+  "GET /admin/wren/datasources/{name}": ["404 NOT_FOUND"],
+  "PUT /admin/wren/datasources/{name}": ["400 BAD_REQUEST", "409 WREN_DISABLED", "503 WREN_UNAVAILABLE"],
+  "DELETE /admin/wren/datasources/{name}": ["404 NOT_FOUND", "409 WREN_DISABLED"],
+  "POST /admin/wren/datasources/{name}/rebuild": ["404 NOT_FOUND", "409 WREN_DISABLED", "503 WREN_UNAVAILABLE"],
+  "POST /admin/wren/datasources/{name}/sync": ["404 NOT_FOUND", "409 WREN_DISABLED", "503 WREN_UNAVAILABLE"],
+  "POST /admin/wren/sync": ["409 WREN_DISABLED"],
+  "POST /admin/wren/datasources/{name}/test": ["400 BAD_REQUEST", "404 NOT_FOUND", "409 WREN_DISABLED"],
   "PUT /api/me/mcp": ["400 INVALID_JSON"],
   "PUT /api/me/mcp/settings": ["400 BAD_REQUEST", "400 INVALID_JSON"],
   "PUT /api/me/skills/{name}": ["400 INVALID_NAME"],
@@ -499,12 +622,20 @@ const BODIES: Record<string, string> = {
   "PUT /api/me/models/config": "modelsConfigJson",
   "PUT /api/me/agents/{name}": "agentDefinition",
   "POST /api/me/agents": "agentDefinition",
+  "PUT /admin/global/agents/{name}": "agentDefinition",
   "POST /internal/maintenance/import": "migrationImport",
   "POST /api/sessions/import": "importSession",
+  "POST /admin/kb": "kbCreate",
+  "PUT /admin/wren/datasources/{name}": "wrenDatasource",
+  "POST /admin/wren/datasources/{name}/sync": "wrenSyncRequest",
+  "POST /admin/wren/datasources/{name}/test": "wrenTestRequest",
+  // multipart：无 JSON schema 先例，operationFor 特判输出 multipart/form-data 最小描述
+  "POST /admin/kb/{slug}/upload": "kbUploadZip",
+  "POST /admin/kb/{slug}/pdf": "kbUploadPdf",
 };
 
 /**
- * 全部 193 个操作的操作级摘要。
+ * 全部操作的操作级摘要（数量随路由面漂移，以运行时 openapi.json 为准）。
  * 规则：一句话说清"做什么 + 关键约束"；不写与代码重复的字段罗列。
  */
 const SUMMARIES: Record<string, string> = {
@@ -719,7 +850,42 @@ const SUMMARIES: Record<string, string> = {
   "DELETE /admin/global/plugins/{name}": "删除全局插件",
   "GET /admin/global/mcp": "全局 MCP 配置",
   "PUT /admin/global/mcp": "写全局 MCP 配置（合成进各用户 workspace）",
+  "GET /admin/global/agents": "全局 agent 定义清单（所有用户可见，用户同名覆盖）",
+  "GET /admin/global/agents/{name}": "全局 agent 定义原文；format=json 返回规范字段 + frontmatter",
+  "PUT /admin/global/agents/{name}": "写全局 agent 定义（合成进各用户新会话 workspace 的 .omp/agents）",
+  "DELETE /admin/global/agents/{name}": "删除全局 agent 定义（新会话不再合成）",
+  // ---- 知识库（DESIGN §38）----
+  "POST /admin/kb": "建知识库：skill 目录骨架（SKILL.md/kb.json/docs/scripts/assets）+ kb.db",
+  "GET /admin/kb": "知识库列表：扫 global/skills/kb-*（kb.json 标记），含 docs 计数",
+  "POST /admin/kb/{slug}/upload":
+    "上传 MinerU ParseOutcome zip（一包一文档）：透传落 docs/<doc>/，markdown.md 改名 <doc>.md，同名重传覆盖",
+  "POST /admin/kb/{slug}/pdf": "补传原始 PDF：写 docs/<doc>/source.pdf 并置 has_pdf=1（截图脚本依赖）",
+  "GET /admin/kb/{slug}/pdf/{doc}": "取文档原始 PDF（application/pdf）",
+  "GET /admin/kb/{slug}/tree": "分组树 + 文档卡片（pages/images/has_pdf/md_sha256；未分组文档挂根部）",
+  "GET /admin/kb/{slug}/index-status":
+    "语义索引状态：update（BM25）在上传响应内已同步完成，embed（向量）后台单飞异步；?probe=1 额外读 qmd status 的待嵌入数",
+  "DELETE /admin/kb/{slug}/doc/{doc}": "删文档：目录 + kb.db 行联动",
+  "DELETE /admin/kb/{slug}":
+    "删知识库：整个 skill 目录 + kb.db（含 -wal/-shm）；workspace 残留 junction 由下次合成清理",
+  // ---- WrenAI 数据源管理（DESIGN §39.2.1）----
+  "GET /admin/wren/datasources": "Wren 数据源列表：state/daemon 端口与存活/models 数/updatedAt（connection 已脱敏）",
+  "GET /admin/wren/datasources/{name}": "单个 Wren 数据源详情（connection 脱敏，password 恒为 ******）",
+  "PUT /admin/wren/datasources/{name}":
+    "创建/更新 Wren 数据源（合并 connection/tables）→ 全量 re-provision（内省生成 MDL + context build + daemon 重启）；201 创建 / 200 更新",
+  "DELETE /admin/wren/datasources/{name}":
+    "删除 Wren 数据源：杀 daemon → mcp.json 移除 → 项目目录删除 → 注册表移除（profiles.yml 残留无害）",
+  "POST /admin/wren/datasources/{name}/rebuild":
+    "重内省 + 重生成 models + context build + daemon 重启（enrich 后同步语义层）",
+  "POST /admin/wren/datasources/{name}/sync":
+    '按 drift 增量同步单数据源：catalogHash 有变化才增量重生成（保留 agent enrich）→ build → 重启 daemon；{"force":true} 跳过短路',
+  "POST /admin/wren/sync":
+    "全量 drift 同步：遍历注册表逐个按 catalogHash 增量同步（单个失败不中断），返回每源 {changed,reason,models}",
+  "POST /admin/wren/datasources/{name}/test":
+    "连接测试（PG SELECT 1 / CH 内省 LIMIT 1；body 可给未落库载荷），不落注册表",
   // ---- 运维 ----
+  "GET /terminal": "TUI 测试页（浏览器 xterm 前端；sid 经 query 传入）",
+  "GET /terminal/assets/{file}": "TUI 测试页静态资产（xterm.js/css/fit，白名单直读）",
+  "GET /terminal/ws/{sid}": "TUI 终端桥 WebSocket 升级（token 可经 query；握手即交接会话写权）",
   "GET /healthz": "存活探针（排空期间返回 503 以摘流量）",
   "GET /readyz": "就绪探针（数据根可写）",
   "GET /metrics": "Prometheus 指标：会话数、流式槽位、用量与成本、限流与预算拒绝",
@@ -774,6 +940,7 @@ const RESPONSES: Record<string, string> = {
   "GET /internal/trash": "TrashList",
   "POST /internal/maintenance/export": "BundleManifest",
   "POST /internal/maintenance/import": "ImportResult",
+  "GET /admin/kb/{slug}/tree": "KbTree",
 };
 
 /** 响应模型定义（components.schemas）。 */
@@ -1279,6 +1446,23 @@ const RESPONSE_SCHEMAS: Record<string, Record<string, unknown>> = {
       removedFiles: { type: "integer" },
     },
   },
+  KbTree: {
+    type: "object",
+    properties: {
+      slug: { type: "string" },
+      title: { type: "string", nullable: true },
+      groups: {
+        type: "array",
+        description: "分组嵌套树（物化路径逐级）",
+        items: { type: "object", additionalProperties: true },
+      },
+      docs: {
+        type: "array",
+        description: "未分组文档卡片（挂根部）",
+        items: { type: "object", additionalProperties: true },
+      },
+    },
+  },
 };
 
 /** 标签（按领域细分；ops 单独一组）。 */
@@ -1373,7 +1557,34 @@ function operationFor(method: string, p: string, rawPath: string): Record<string
 
   // 请求体
   const bodyType = BODIES[key];
-  if (bodyType) {
+  if (bodyType === "kbUploadZip" || bodyType === "kbUploadPdf") {
+    // multipart 最小描述（参照 importSession 的原文通道特判）
+    op.requestBody = {
+      required: true,
+      content: {
+        "multipart/form-data": {
+          schema:
+            bodyType === "kbUploadZip"
+              ? {
+                  type: "object",
+                  required: ["zip"],
+                  properties: {
+                    zip: { type: "string", format: "binary", description: "MinerU ParseOutcome zip（一包一文档）" },
+                    group: { type: "string", description: "分组物化路径（如 A/B/C；缺省归根）" },
+                  },
+                }
+              : {
+                  type: "object",
+                  required: ["doc", "pdf"],
+                  properties: {
+                    doc: { type: "string", description: "已入库的文档名" },
+                    pdf: { type: "string", format: "binary", description: "原始 PDF（写 docs/<doc>/source.pdf）" },
+                  },
+                },
+        },
+      },
+    };
+  } else if (bodyType) {
     if (bodyType === "importSession") {
       op.requestBody = {
         required: true,

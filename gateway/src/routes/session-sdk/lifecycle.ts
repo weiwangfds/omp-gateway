@@ -78,7 +78,7 @@ export function mountLifecycleRoutes(app: Hono<SdkEnv>, shared: SdkShared): void
         workspace_id: newSid,
         parent_id: row.id,
         title: typeof body?.title === "string" ? body.title : row.title ? `${row.title} (fork)` : "fork",
-        session_file: session.sessionFile ?? null,
+        session_file: session.sessionFile ? toStorePath(session.sessionFile) : null,
         model_provider: row.model_provider,
         model_id: row.model_id,
       });

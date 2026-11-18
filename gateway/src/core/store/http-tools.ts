@@ -37,7 +37,7 @@ export function upsertHttpTool(row: {
   db.run(
     `INSERT INTO http_tools (id, user_id, session_id, name, label, description, parameters_json, url, secret, timeout_ms, approval)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(id) DO UPDATE SET label=excluded.label, description=excluded.description,
+     ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, label=excluded.label, description=excluded.description,
        parameters_json=excluded.parameters_json, url=excluded.url, secret=excluded.secret,
        timeout_ms=excluded.timeout_ms, approval=excluded.approval, disabled=0`,
     [
